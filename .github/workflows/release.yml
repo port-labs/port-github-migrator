@@ -1,0 +1,73 @@
+name: Auto-tag and Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and push tag
+        id: tag
+        uses: anothrNick/github-tag-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+          DEFAULT_BUMP: patch
+          RELEASE_BRANCHES: main
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [tag]
+    if: needs.tag.outputs.new_tag != ''
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            asset: port-github-migrator-linux-x64
+          - os: darwin
+            arch: amd64
+            asset: port-github-migrator-macos-x64
+          - os: darwin
+            arch: arm64
+            asset: port-github-migrator-macos-arm64
+          - os: windows
+            arch: amd64
+            asset: port-github-migrator-win-x64.exe
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Build binary
+        run: |
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build \
+            -ldflags="-X main.Version=${{ needs.tag.outputs.new_tag }} -s -w" \
+            -o bin/${{ matrix.asset }} ./cmd
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: bin/${{ matrix.asset }}
+          tag_name: ${{ needs.tag.outputs.new_tag }}
+          token: ${{ github.token }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
