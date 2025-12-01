@@ -1,6 +1,6 @@
 VERSION := 1.0.0
 BINARY_NAME := port-github-migrator
-REPO := github.com/omby8888/port-github-migrator
+REPO := github.com/port-labs/port-github-migrator
 
 # Build variables
 LDFLAGS := -ldflags="-X main.Version=$(VERSION) -s -w"

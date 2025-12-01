@@ -9,7 +9,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-REPO="omby8888/port-github-migrator"
+REPO="port-labs/port-github-migrator"
 LATEST_RELEASE_URL="https://api.github.com/repos/$REPO/releases/latest"
 
 # Detect OS and architecture
