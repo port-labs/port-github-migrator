@@ -15,7 +15,7 @@ A fast, single-file CLI tool written in Go to safely migrate Port entities from 
 One-line installation that automatically downloads the correct binary for your platform:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/omby8888/port-github-migrator/main/install.sh | bash
+curl -sL https://raw.githubusercontent.com/port-labs/port-github-migrator/main/install.sh | bash
 ```
 
 The script will:
@@ -34,7 +34,7 @@ port-github-migrator --version
 
 If you prefer manual installation:
 
-1. Go to [GitHub Releases](https://github.com/omby8888/port-github-migrator/releases)
+1. Go to [GitHub Releases](https://github.com/port-labs/port-github-migrator/releases)
 2. Download the binary for your platform (e.g., `port-github-migrator-macos-arm64`)
 3. Make it executable and move to your PATH:
    ```bash
@@ -118,7 +118,7 @@ Migrate entities from old to new installation:
 port-github-migrator migrate githubRepository
 
 # Migrate all blueprints
-port-github-migrator migrate all
+port-github-migrator migrate --all
 
 # Dry-run (see what would be migrated)
 port-github-migrator migrate githubRepository --dry-run
