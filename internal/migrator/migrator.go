@@ -101,6 +101,7 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 			if err := m.migrateBlueprint(bp, newDatasourceID); err != nil {
 				stats.FailedBatches++
 				stats.Errors = append(stats.Errors, fmt.Sprintf("Failed to migrate blueprint %s: %v", bp, err))
+				fmt.Printf("❌ Error migrating blueprint %s: %v\n", bp, err)
 				continue
 			}
 		}
@@ -109,7 +110,11 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 	}
 
 	fmt.Println()
-	fmt.Printf("✅ Migration complete! Successfully migrated %d blueprints\n", stats.SuccessfulBatches)
+	if stats.FailedBatches > 0 {
+		fmt.Printf("⚠️  Migration completed with errors. Successfully migrated %d blueprints, %d failed\n", stats.SuccessfulBatches, stats.FailedBatches)
+	} else {
+		fmt.Printf("✅ Migration complete! Successfully migrated %d blueprints\n", stats.SuccessfulBatches)
+	}
 
 	return stats, nil
 }
@@ -133,8 +138,8 @@ func (m *Migrator) migrateBlueprint(blueprintID, newDatasourceID string) error {
 		identifiers[i] = entity.Identifier
 	}
 
-	// Patch in batches of 100
-	batchSize := 100
+	// Patch in batches of 20
+	batchSize := 20
 	for i := 0; i < len(identifiers); i += batchSize {
 		end := i + batchSize
 		if end > len(identifiers) {
