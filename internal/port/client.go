@@ -83,17 +83,9 @@ func NewClient(baseURL, clientID, clientSecret string) *Client {
 	}
 }
 
-// getToken returns a valid access token, refreshing if necessary
-func (c *Client) getToken() (string, error) {
+func (c *Client) fetchAccessToken() (string, error) {
 	now := time.Now()
-	threeMinutes := 3 * time.Minute
 
-	// Check if token is still valid for at least 3 minutes
-	if c.token != "" && now.Add(threeMinutes).Before(c.tokenExpires) {
-		return c.token, nil
-	}
-
-	// Authenticate
 	body := map[string]string{
 		"clientId":     c.clientID,
 		"clientSecret": c.clientSecret,
@@ -126,21 +118,61 @@ func (c *Client) getToken() (string, error) {
 	return c.token, nil
 }
 
-// GetIntegrationVersion fetches the version of an integration
-func (c *Client) GetIntegrationVersion(installationID string) (string, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return "", err
+func (c *Client) getToken() (string, error) {
+	now := time.Now()
+	threeMinutes := 3 * time.Minute
+
+	if c.token != "" && now.Add(threeMinutes).Before(c.tokenExpires) {
+		return c.token, nil
 	}
 
-	req, _ := http.NewRequest(
+	return c.fetchAccessToken()
+}
+
+func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentType string) (*http.Response, error) {
+	attempt := func() (*http.Response, error) {
+		var r io.Reader
+		if len(body) > 0 {
+			r = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest(method, url, r)
+		if err != nil {
+			return nil, err
+		}
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		token, err := c.getToken()
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+		return c.httpClient.Do(req)
+	}
+
+	resp, err := attempt()
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if _, err := c.fetchAccessToken(); err != nil {
+			return nil, err
+		}
+		return attempt()
+	}
+	return resp, nil
+}
+
+// GetIntegrationVersion fetches the version of an integration
+func (c *Client) GetIntegrationVersion(installationID string) (string, error) {
+	resp, err := c.doAuthorizedRequest(
 		"GET",
 		fmt.Sprintf("%s/v1/integration/%s", c.baseURL, installationID),
 		nil,
+		"",
 	)
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request failed: %w", err)
 	}
@@ -169,19 +201,12 @@ func (c *Client) GetIntegrationVersion(installationID string) (string, error) {
 
 // GetBlueprintsByDataSource fetches all blueprints for an installation
 func (c *Client) GetBlueprintsByDataSource(installationID string) ([]string, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
-
-	req, _ := http.NewRequest(
+	resp, err := c.doAuthorizedRequest(
 		"GET",
 		fmt.Sprintf("%s/v1/data-sources", c.baseURL),
 		nil,
+		"",
 	)
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -222,14 +247,10 @@ func (c *Client) GetBlueprintsByDataSource(installationID string) ([]string, err
 
 // searchEntitiesByBlueprint searches for entities with optional query
 func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]interface{}) ([]Entity, error) {
-	token, err := c.getToken()
-	if err != nil {
-		return nil, err
-	}
-
 	allEntities := []Entity{}
 	limit := 200
 	var next string
+	searchURL := fmt.Sprintf("%s/v1/blueprints/%s/entities/search", c.baseURL, blueprintID)
 
 	for {
 		reqBody := map[string]interface{}{
@@ -244,31 +265,28 @@ func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]
 			reqBody["from"] = next
 		}
 
-		bodyBytes, _ := json.Marshal(reqBody)
+		bodyBytes, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, err
+		}
 
-		req, _ := http.NewRequest(
-			"POST",
-			fmt.Sprintf("%s/v1/blueprints/%s/entities/search", c.baseURL, blueprintID),
-			bytes.NewReader(bodyBytes),
-		)
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := c.httpClient.Do(req)
+		resp, err := c.doAuthorizedRequest("POST", searchURL, bodyBytes, "application/json")
 		if err != nil {
 			return nil, fmt.Errorf("request failed: %w", err)
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			return nil, fmt.Errorf("search failed: %s", string(body))
 		}
 
 		var searchResp SearchResponse
 		if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decode response: %w", err)
 		}
+		resp.Body.Close()
 
 		allEntities = append(allEntities, searchResp.Entities...)
 
@@ -282,9 +300,8 @@ func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]
 	return allEntities, nil
 }
 
-// SearchOldEntitiesByBlueprint searches for old GitHub App entities
-func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID string) ([]Entity, error) {
-	query := map[string]interface{}{
+func oldGitHubAppEntityQuery(oldInstallationID string) map[string]interface{} {
+	return map[string]interface{}{
 		"combinator": "and",
 		"rules": []map[string]interface{}{
 			{
@@ -299,8 +316,11 @@ func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID str
 			},
 		},
 	}
+}
 
-	return c.searchEntitiesByBlueprint(blueprintID, query)
+// SearchOldEntitiesByBlueprint searches for old GitHub App entities
+func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID string) ([]Entity, error) {
+	return c.searchEntitiesByBlueprint(blueprintID, oldGitHubAppEntityQuery(oldInstallationID))
 }
 
 // SearchNewEntitiesByBlueprint searches for new GitHub Ocean entities
@@ -330,27 +350,22 @@ func (c *Client) PatchEntitiesDatasourceBulk(blueprintID string, entitiesIdentif
 		return nil
 	}
 
-	token, err := c.getToken()
-	if err != nil {
-		return err
-	}
-
 	payload := BulkPatchRequest{
 		EntitiesIdentifiers: entitiesIdentifiers,
 		Datasource:          newDatasource,
 	}
 
-	bodyBytes, _ := json.Marshal(payload)
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
 
-	req, _ := http.NewRequest(
+	resp, err := c.doAuthorizedRequest(
 		"PATCH",
 		fmt.Sprintf("%s/v1/blueprints/%s/datasource/bulk", c.baseURL, blueprintID),
-		bytes.NewReader(bodyBytes),
+		bodyBytes,
+		"application/json",
 	)
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
