@@ -3,10 +3,11 @@ package commands
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
+	blueprintcounts "github.com/port-labs/port-github-migrator/internal/blueprints"
 	"github.com/port-labs/port-github-migrator/internal/migrator"
 	"github.com/port-labs/port-github-migrator/internal/models"
 	"github.com/port-labs/port-github-migrator/internal/port"
+	"github.com/spf13/cobra"
 )
 
 func NewMigrateCommand() *cobra.Command {
@@ -55,8 +56,14 @@ func NewMigrateCommand() *cobra.Command {
 				return fmt.Errorf("❌ missing required options: %v", missing)
 			}
 
-			// Create Port client
-			client := port.NewClient(portURL, clientID, clientSecret)
+			// Open shared SQLite cache
+			st, err := openStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			client := port.NewClient(portURL, clientID, clientSecret, st)
 
 			// Get integration version
 			version, err := client.GetIntegrationVersion(newInstallID)
@@ -79,44 +86,44 @@ func NewMigrateCommand() *cobra.Command {
 			// Create migrator
 			mig := migrator.NewMigrator(client, config)
 
-		// If migrating "all", show blueprints with entity counts first
-		if all {
-			fmt.Println("📋 Blueprints to migrate:")
-			fmt.Println("NAME                              ENTITIES")
-			fmt.Println("──────────────────────────────────────────")
-			
-			blueprints, err := client.GetBlueprintsByDataSource(oldInstallID)
-			if err != nil {
-				return fmt.Errorf("failed to get blueprints: %w", err)
-			}
-			
-			for _, bp := range blueprints {
-				entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID)
+			// If migrating "all", show blueprints with entity counts first
+			if all {
+				fmt.Println("📋 Blueprints to migrate:")
+				fmt.Println("NAME                              ENTITIES")
+				fmt.Println("──────────────────────────────────────────")
+
+				blueprints, err := client.GetBlueprintsByDataSource(oldInstallID)
 				if err != nil {
-					fmt.Printf("%-33s ?\n", bp)
-					continue
+					return fmt.Errorf("failed to get blueprints: %w", err)
 				}
-				count := len(entities)
-				
-				// Skip empty blueprints (no entities to migrate)
-				if count == 0 {
-					continue
+
+				counts, _ := blueprintcounts.CountOldEntities(client, blueprints, oldInstallID)
+				for _, bp := range blueprints {
+					count, ok := counts[bp]
+					if !ok {
+						fmt.Printf("%-33s ?\n", bp)
+						continue
+					}
+
+					// Skip empty blueprints (no entities to migrate)
+					if count == 0 {
+						continue
+					}
+
+					fmt.Printf("%-33s %d\n", bp, count)
 				}
-				
-				fmt.Printf("%-33s %d\n", bp, count)
+				fmt.Println()
 			}
-			fmt.Println()
-		}
 
-		// Determine if migrating single blueprint or all
-		var bp *string
-		if !all && blueprint != "" {
-			bp = &blueprint
-		}
+			// Determine if migrating single blueprint or all
+			var bp *string
+			if !all && blueprint != "" {
+				bp = &blueprint
+			}
 
-		// Run migration
-		_, err = mig.Migrate(newDatasourceID, bp, dryRun)
-		return err
+			// Run migration
+			_, err = mig.Migrate(newDatasourceID, bp, dryRun)
+			return err
 		},
 	}
 

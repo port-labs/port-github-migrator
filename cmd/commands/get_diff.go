@@ -3,16 +3,16 @@ package commands
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
 	"github.com/port-labs/port-github-migrator/internal/diff"
 	"github.com/port-labs/port-github-migrator/internal/port"
+	"github.com/spf13/cobra"
 )
 
 func NewGetDiffCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "get-diff <sourceBlueprint> <targetBlueprint>",
-		Short:        "Compare entities between source and target blueprints",
-		Long:         `Compare entities from the source blueprint (with old datasource) to the target blueprint (with new datasource).`,
+		Use:   "get-diff <sourceBlueprint> <targetBlueprint>",
+		Short: "Compare entities between source and target blueprints",
+		Long:  `Compare entities from the source blueprint (with old datasource) to the target blueprint (with new datasource).`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) < 2 {
 				return fmt.Errorf("❌ both sourceBlueprint and targetBlueprint arguments are required. Usage: get-diff <sourceBlueprint> <targetBlueprint>")
@@ -32,7 +32,6 @@ func NewGetDiffCommand() *cobra.Command {
 			sourceBlueprint := args[0]
 			targetBlueprint := args[1]
 
-			// Validate required parameters
 			var missing []string
 			if clientID == "" {
 				missing = append(missing, "--client-id")
@@ -50,28 +49,27 @@ func NewGetDiffCommand() *cobra.Command {
 				return fmt.Errorf("❌ missing required options: %v", missing)
 			}
 
-			// Parse limit
 			limit := 10
 			if limitStr != "" {
 				fmt.Sscanf(limitStr, "%d", &limit)
 			}
 
-			// Create Port client
-			client := port.NewClient(portURL, clientID, clientSecret)
+			st, err := openStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
 
-			// Create diff service
+			client := port.NewClient(portURL, clientID, clientSecret, st)
 			diffService := diff.NewService(client)
 
-			// Run comparison
 			result, err := diffService.CompareBlueprints(sourceBlueprint, targetBlueprint, oldInstallID, newInstallID)
 			if err != nil {
 				return fmt.Errorf("failed to compare blueprints: %w", err)
 			}
 
-			// Print summary
 			diffService.PrintSummary(result)
 
-			// Show detailed diffs if enabled
 			if showDiffs && len(result.Changes) > 0 {
 				diffService.PrintDetailedDiffs(result.Changes, limit)
 			}

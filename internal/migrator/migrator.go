@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	blueprintcounts "github.com/port-labs/port-github-migrator/internal/blueprints"
 	"github.com/port-labs/port-github-migrator/internal/models"
 	"github.com/port-labs/port-github-migrator/internal/port"
 )
@@ -49,18 +50,15 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 	fmt.Println()
 
 	totalEntities := 0
-	blueprintCounts := make(map[string]int)
+	blueprintCounts, err := m.countOldBlueprintEntities(blueprints)
+	if err != nil {
+		return nil, err
+	}
 
-	// Count entities for each blueprint
-	for _, bp := range blueprints {
-		entities, err := m.client.SearchOldEntitiesByBlueprint(bp, m.config.OldInstallationID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to search entities for blueprint %s: %w", bp, err)
-		}
-		count := len(entities)
-		blueprintCounts[bp] = count
+	for _, count := range blueprintCounts {
 		totalEntities += count
 	}
+	stats.TotalEntities = totalEntities
 
 	fmt.Printf("📊 Total entities affected: %d\n", totalEntities)
 
@@ -87,14 +85,14 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 	// Migrate each blueprint
 	for _, bp := range blueprints {
 		count := blueprintCounts[bp]
-		
+
 		// Skip blueprints with no entities
 		if count == 0 {
 			fmt.Printf("\n🔄 Migrating %d entities from blueprint: %s\n", count, bp)
 			fmt.Println("⏭️  No entities to migrate")
 			continue
 		}
-		
+
 		fmt.Printf("\n🔄 Migrating %d entities from blueprint: %s\n", count, bp)
 
 		if !dryRun {
@@ -154,6 +152,25 @@ func (m *Migrator) migrateBlueprint(blueprintID, newDatasourceID string) error {
 		fmt.Printf("✅ Successfully patched %d entities\n", len(batch))
 	}
 
+	if store := m.client.Store(); store != nil {
+		if err := store.DeleteEntities(blueprintID, m.config.OldInstallationID); err != nil {
+			fmt.Printf("⚠️  failed to invalidate entity cache for %s: %v\n", blueprintID, err)
+		}
+		if err := store.DeleteSyncTimestamp(blueprintID, m.config.OldInstallationID); err != nil {
+			fmt.Printf("⚠️  failed to invalidate sync metadata for %s: %v\n", blueprintID, err)
+		}
+	}
+
 	return nil
 }
 
+func (m *Migrator) countOldBlueprintEntities(blueprints []string) (map[string]int, error) {
+	counts, errs := blueprintcounts.CountOldEntities(m.client, blueprints, m.config.OldInstallationID)
+	for _, bp := range blueprints {
+		if err, ok := errs[bp]; ok {
+			return nil, fmt.Errorf("failed to search entities for blueprint %s: %w", bp, err)
+		}
+	}
+
+	return counts, nil
+}

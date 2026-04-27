@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"fmt"
 	"os"
 
+	"github.com/port-labs/port-github-migrator/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -40,3 +42,16 @@ func getEnv(key, defaultVal string) string {
 	return defaultVal
 }
 
+// openStore opens the on-disk SQLite cache used by all Port API calls.
+// Each command opens its own handle so the connection is closed on exit.
+func openStore() (*store.Store, error) {
+	path, err := store.DefaultPath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve cache path: %w", err)
+	}
+	st, err := store.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open cache at %s: %w", path, err)
+	}
+	return st, nil
+}

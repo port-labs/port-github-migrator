@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	blueprintcounts "github.com/port-labs/port-github-migrator/internal/blueprints"
 	"github.com/port-labs/port-github-migrator/internal/port"
 	"github.com/spf13/cobra"
 )
@@ -36,8 +37,13 @@ func NewGetBlueprintsCommand() *cobra.Command {
 				return fmt.Errorf("❌ missing required options: %v", missing)
 			}
 
-			// Create Port client
-			client := port.NewClient(portURL, clientID, clientSecret)
+			st, err := openStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+
+			client := port.NewClient(portURL, clientID, clientSecret, st)
 
 			// Get blueprints
 			blueprints, err := client.GetBlueprintsByDataSource(oldInstallID)
@@ -50,15 +56,14 @@ func NewGetBlueprintsCommand() *cobra.Command {
 
 			fmt.Println("NAME                              ENTITIES")
 			fmt.Println("──────────────────────────────────────────")
+			counts, _ := blueprintcounts.CountOldEntities(client, blueprints, oldInstallID)
 			for _, bp := range blueprints {
-				// Count entities for this blueprint
-				entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID)
-				if err != nil {
+				count, ok := counts[bp]
+				if !ok {
 					// If we can't get count, just show the blueprint name
 					fmt.Printf("%-33s ?\n", bp)
 					continue
 				}
-				count := len(entities)
 
 				// Skip empty blueprints unless --include-empty is set
 				if count == 0 && !includeEmpty {

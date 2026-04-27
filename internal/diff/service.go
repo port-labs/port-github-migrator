@@ -4,99 +4,112 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/port-labs/port-github-migrator/internal/models"
 	"github.com/port-labs/port-github-migrator/internal/port"
+	"github.com/port-labs/port-github-migrator/internal/store"
 )
 
 // Service handles entity comparison
 type Service struct {
 	client *port.Client
+	store  *store.Store
 }
 
 // NewService creates a new diff service
 func NewService(client *port.Client) *Service {
-	return &Service{client: client}
+	return &Service{
+		client: client,
+		store:  client.Store(),
+	}
 }
 
-// CompareBlueprints compares entities between source and target blueprints
+// excludedDiffProps lists property keys we ignore when computing per-property diffs.
+// These are server-managed fields that may legitimately differ between integrations
+// without representing a meaningful content change.
+var excludedDiffProps = map[string]bool{
+	"blueprint": true,
+	"createdAt": true,
+	"updatedAt": true,
+	"createdBy": true,
+	"updatedBy": true,
+}
+
+// CompareBlueprints compares entities between source and target blueprints.
+// The fetch-and-cache happens via the Port client; the actual diff is computed
+// against the SQLite store using JOINs on identifier and hash equality.
 func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstallID string) (*models.DiffResult, error) {
-	// Get source entities (old installation)
-	sourceEntities, err := s.client.SearchOldEntitiesByBlueprint(sourceBP, oldInstallID)
+	var (
+		sourceErr error
+		targetErr error
+		wg        sync.WaitGroup
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, sourceErr = s.client.SearchOldEntitiesByBlueprint(sourceBP, oldInstallID)
+	}()
+	go func() {
+		defer wg.Done()
+		_, targetErr = s.client.SearchNewEntitiesByBlueprint(targetBP, newInstallID)
+	}()
+	wg.Wait()
+
+	if sourceErr != nil {
+		return nil, fmt.Errorf("failed to get source entities: %w", sourceErr)
+	}
+	if targetErr != nil {
+		return nil, fmt.Errorf("failed to get target entities: %w", targetErr)
+	}
+
+	sets, err := s.store.DiffBlueprints(sourceBP, oldInstallID, targetBP, newInstallID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get source entities: %w", err)
+		return nil, fmt.Errorf("compute diff sets: %w", err)
 	}
 
-	// Get target entities (new installation)
-	targetEntities, err := s.client.SearchNewEntitiesByBlueprint(targetBP, newInstallID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get target entities: %w", err)
-	}
-
-	// Index entities
-	sourceMap := make(map[string]port.Entity)
-	targetMap := make(map[string]port.Entity)
-
-	for _, e := range sourceEntities {
-		sourceMap[e.Identifier] = e
-	}
-
-	for _, e := range targetEntities {
-		targetMap[e.Identifier] = e
-	}
-
-	// Compare entities
 	result := &models.DiffResult{
 		SourceBlueprint: sourceBP,
 		TargetBlueprint: targetBP,
 		Changes:         []models.EntityChange{},
 	}
 
-	excludedProps := map[string]bool{
-		"blueprint": true,
-		"createdAt": true,
-		"updatedAt": true,
-		"createdBy": true,
-		"updatedBy": true,
+	result.Summary.Identical = sets.IdenticalCount
+
+	for _, pair := range sets.Changed {
+		var sourceEntity, targetEntity models.Entity
+		if err := json.Unmarshal([]byte(pair.SourceBlob), &sourceEntity); err != nil {
+			return nil, fmt.Errorf("decode source blob for %s: %w", pair.Identifier, err)
+		}
+		if err := json.Unmarshal([]byte(pair.TargetBlob), &targetEntity); err != nil {
+			return nil, fmt.Errorf("decode target blob for %s: %w", pair.Identifier, err)
+		}
+
+		result.Summary.Changed++
+		result.Changes = append(result.Changes, models.EntityChange{
+			Identifier:    pair.Identifier,
+			Type:          models.EntityChangeTypeChanged,
+			PropertyDiffs: getPropertyDiffs(sourceEntity, targetEntity, excludedDiffProps),
+		})
 	}
 
-	// Check common entities
-	for id, sourceEntity := range sourceMap {
-		if targetEntity, exists := targetMap[id]; exists {
-			// Entity exists in both
-			if entitiesEqual(sourceEntity, targetEntity, excludedProps) {
-				result.Summary.Identical++
-			} else {
-				result.Summary.Changed++
-				change := models.EntityChange{
-					Identifier: id,
-					Type:       "changed",
-					PropertyDiffs: getPropertyDiffs(sourceEntity, targetEntity, excludedProps),
-				}
-				result.Changes = append(result.Changes, change)
-			}
-		} else {
-			// Entity only in source (not migrated)
-			result.Summary.NotMigrated++
-			change := models.EntityChange{
-				Identifier: id,
-				Type:       "notMigrated",
-				OldEntity:  entityToMap(sourceEntity),
-			}
-			result.Changes = append(result.Changes, change)
-		}
+	for _, entity := range sets.NotMigrated {
+		result.Summary.NotMigrated++
+		result.Changes = append(result.Changes, models.EntityChange{
+			Identifier: entity.Identifier,
+			Type:       models.EntityChangeTypeNotMigrated,
+			OldEntity:  entityToMap(entity),
+		})
 	}
 
-	// Check for orphaned entities (only in target)
-	for id := range targetMap {
-		if _, exists := sourceMap[id]; !exists {
-			result.Summary.Orphaned++
-			change := models.EntityChange{
-				Identifier: id,
-				Type:       "orphaned",
-			}
-			result.Changes = append(result.Changes, change)
-		}
+	for _, entity := range sets.Orphaned {
+		result.Summary.Orphaned++
+		result.Changes = append(result.Changes, models.EntityChange{
+			Identifier: entity.Identifier,
+			Type:       models.EntityChangeTypeOrphaned,
+			NewEntity:  entityToMap(entity),
+		})
 	}
 
 	return result, nil
@@ -111,7 +124,7 @@ func (s *Service) PrintSummary(result *models.DiffResult) {
 	if result.Summary.NotMigrated > 0 {
 		fmt.Printf("   ⚠️  %d not migrated (only in old)\n", result.Summary.NotMigrated)
 		for _, change := range result.Changes {
-			if change.Type == "notMigrated" {
+			if change.Type == models.EntityChangeTypeNotMigrated {
 				fmt.Printf("       • %s\n", change.Identifier)
 			}
 		}
@@ -120,7 +133,7 @@ func (s *Service) PrintSummary(result *models.DiffResult) {
 	if result.Summary.Orphaned > 0 {
 		fmt.Printf("   ❌ %d orphaned (only in new)\n", result.Summary.Orphaned)
 		for _, change := range result.Changes {
-			if change.Type == "orphaned" {
+			if change.Type == models.EntityChangeTypeOrphaned {
 				fmt.Printf("       • %s\n", change.Identifier)
 			}
 		}
@@ -130,10 +143,9 @@ func (s *Service) PrintSummary(result *models.DiffResult) {
 
 // PrintDetailedDiffs prints detailed property diffs for changed entities
 func (s *Service) PrintDetailedDiffs(changes []models.EntityChange, limit int) {
-	// Count changed entities
 	changedCount := 0
 	for _, change := range changes {
-		if change.Type == "changed" {
+		if change.Type == models.EntityChangeTypeChanged {
 			changedCount++
 		}
 	}
@@ -147,7 +159,7 @@ func (s *Service) PrintDetailedDiffs(changes []models.EntityChange, limit int) {
 
 	shown := 0
 	for _, change := range changes {
-		if change.Type != "changed" {
+		if change.Type != models.EntityChangeTypeChanged {
 			continue
 		}
 
@@ -161,7 +173,6 @@ func (s *Service) PrintDetailedDiffs(changes []models.EntityChange, limit int) {
 		}
 
 		fmt.Printf("  • %s\n", change.Identifier)
-		// Flatten nested diffs into dot-notation paths
 		flatDiffs := flattenDiffs(change.PropertyDiffs)
 		for _, path := range flatDiffs {
 			fmt.Printf("    - %s: %v\n", path.Path, path.OldValue)
@@ -173,28 +184,8 @@ func (s *Service) PrintDetailedDiffs(changes []models.EntityChange, limit int) {
 	fmt.Println()
 }
 
-// Helper functions
-
-func entitiesEqual(e1, e2 port.Entity, excluded map[string]bool) bool {
-	// Compare title
-	if e1.Title != e2.Title {
-		return false
-	}
-
-	// Compare properties (excluding specific fields)
-	m1 := filterProperties(e1.Properties, excluded)
-	m2 := filterProperties(e2.Properties, excluded)
-
-	if !reflect.DeepEqual(m1, m2) {
-		return false
-	}
-
-	// Compare relations
-	return reflect.DeepEqual(e1.Relations, e2.Relations)
-}
-
-func filterProperties(props map[string]interface{}, excluded map[string]bool) map[string]interface{} {
-	result := make(map[string]interface{})
+func filterProperties(props map[string]any, excluded map[string]bool) map[string]any {
+	result := make(map[string]any)
 	for k, v := range props {
 		if !excluded[k] {
 			result[k] = v
@@ -203,10 +194,9 @@ func filterProperties(props map[string]interface{}, excluded map[string]bool) ma
 	return result
 }
 
-func getPropertyDiffs(e1, e2 port.Entity, excluded map[string]bool) map[string]models.PropertyDiff {
+func getPropertyDiffs(e1, e2 models.Entity, excluded map[string]bool) map[string]models.PropertyDiff {
 	diffs := make(map[string]models.PropertyDiff)
 
-	// Check title
 	if e1.Title != e2.Title {
 		diffs["title"] = models.PropertyDiff{
 			OldValue: e1.Title,
@@ -217,7 +207,6 @@ func getPropertyDiffs(e1, e2 port.Entity, excluded map[string]bool) map[string]m
 	m1 := filterProperties(e1.Properties, excluded)
 	m2 := filterProperties(e2.Properties, excluded)
 
-	// Check e1 properties
 	for k, v1 := range m1 {
 		v2, exists := m2[k]
 		if !exists || !reflect.DeepEqual(v1, v2) {
@@ -228,7 +217,6 @@ func getPropertyDiffs(e1, e2 port.Entity, excluded map[string]bool) map[string]m
 		}
 	}
 
-	// Check e2 properties for new fields
 	for k, v2 := range m2 {
 		if _, exists := m1[k]; !exists {
 			diffs["properties."+k] = models.PropertyDiff{
@@ -238,7 +226,6 @@ func getPropertyDiffs(e1, e2 port.Entity, excluded map[string]bool) map[string]m
 		}
 	}
 
-	// Check relations
 	if !reflect.DeepEqual(e1.Relations, e2.Relations) {
 		diffs["relations"] = models.PropertyDiff{
 			OldValue: e1.Relations,
@@ -249,9 +236,9 @@ func getPropertyDiffs(e1, e2 port.Entity, excluded map[string]bool) map[string]m
 	return diffs
 }
 
-func entityToMap(e port.Entity) map[string]interface{} {
+func entityToMap(e models.Entity) map[string]any {
 	data, _ := json.Marshal(e)
-	var m map[string]interface{}
+	var m map[string]any
 	json.Unmarshal(data, &m)
 	return m
 }
@@ -264,16 +251,8 @@ func repeatString(s string, count int) string {
 	return result
 }
 
-// FlattenedDiff represents a single flattened property difference
-type FlattenedDiff struct {
-	Path     string
-	OldValue interface{}
-	NewValue interface{}
-}
-
-// flattenDiffs flattens nested property diffs into dot-notation paths
-func flattenDiffs(diffs map[string]models.PropertyDiff) []FlattenedDiff {
-	var result []FlattenedDiff
+func flattenDiffs(diffs map[string]models.PropertyDiff) []models.FlattenedDiff {
+	var result []models.FlattenedDiff
 
 	for prop, diff := range diffs {
 		flattenedPaths := flattenValue(prop, diff.OldValue, diff.NewValue)
@@ -283,16 +262,13 @@ func flattenDiffs(diffs map[string]models.PropertyDiff) []FlattenedDiff {
 	return result
 }
 
-// flattenValue recursively flattens a value into dot-notation paths
-func flattenValue(prefix string, oldVal, newVal interface{}) []FlattenedDiff {
-	var result []FlattenedDiff
+func flattenValue(prefix string, oldVal, newVal any) []models.FlattenedDiff {
+	var result []models.FlattenedDiff
 
-	// If both are maps, recursively flatten
-	oldMap, oldIsMap := oldVal.(map[string]interface{})
-	newMap, newIsMap := newVal.(map[string]interface{})
+	oldMap, oldIsMap := oldVal.(map[string]any)
+	newMap, newIsMap := newVal.(map[string]any)
 
 	if oldIsMap && newIsMap {
-		// Check all keys from both maps
 		allKeys := make(map[string]bool)
 		for k := range oldMap {
 			allKeys[k] = true
@@ -308,15 +284,13 @@ func flattenValue(prefix string, oldVal, newVal interface{}) []FlattenedDiff {
 			result = append(result, flattenValue(newPrefix, oldV, newV)...)
 		}
 	} else if oldIsMap || newIsMap {
-		// One is a map, one isn't - show as single diff
-		result = append(result, FlattenedDiff{
+		result = append(result, models.FlattenedDiff{
 			Path:     prefix,
 			OldValue: oldVal,
 			NewValue: newVal,
 		})
 	} else if !reflect.DeepEqual(oldVal, newVal) {
-		// Values are different - add as diff
-		result = append(result, FlattenedDiff{
+		result = append(result, models.FlattenedDiff{
 			Path:     prefix,
 			OldValue: oldVal,
 			NewValue: newVal,
@@ -325,4 +299,3 @@ func flattenValue(prefix string, oldVal, newVal interface{}) []FlattenedDiff {
 
 	return result
 }
-
