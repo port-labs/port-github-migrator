@@ -22,13 +22,13 @@ func NewService(client *port.Client) *Service {
 // CompareBlueprints compares entities between source and target blueprints
 func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstallID string) (*models.DiffResult, error) {
 	// Get source entities (old installation)
-	sourceEntities, err := s.client.SearchOldEntitiesByBlueprint(sourceBP, oldInstallID)
+	sourceEntities, err := s.client.SearchOldEntitiesByBlueprint(sourceBP, oldInstallID, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get source entities: %w", err)
 	}
 
 	// Get target entities (new installation)
-	targetEntities, err := s.client.SearchNewEntitiesByBlueprint(targetBP, newInstallID)
+	targetEntities, err := s.client.SearchNewEntitiesByBlueprint(targetBP, newInstallID, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get target entities: %w", err)
 	}

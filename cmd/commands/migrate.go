@@ -91,7 +91,7 @@ func NewMigrateCommand() *cobra.Command {
 			}
 			
 			for _, bp := range blueprints {
-				entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID)
+				entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID, nil)
 				if err != nil {
 					fmt.Printf("%-33s ?\n", bp)
 					continue

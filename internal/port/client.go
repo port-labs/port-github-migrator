@@ -73,7 +73,32 @@ type BulkPatchRequest struct {
 	Datasource          string   `json:"datasource"`
 }
 
-// NewClient creates a new Port API client
+type Blueprint struct {
+	Identifier string `json:"identifier"`
+	Schema struct {
+		Properties map[string]any `json:"properties"`
+	} `json:"schema"`
+	Relations map[string]any `json:"relations"`
+}
+
+type BlueprintResponse struct {
+	Blueprint Blueprint `json:"blueprint"`
+}
+
+type SearchOptions struct {
+    IncludeProperties bool
+    IncludeRelations  bool
+    EnforceTotalLimit bool
+}
+
+func DefaultSearchOptions() SearchOptions {
+    return SearchOptions{
+        IncludeProperties: true,
+        IncludeRelations:  true,
+        EnforceTotalLimit: true,
+    }
+}
+
 func NewClient(baseURL, clientID, clientSecret string) *Client {
 	return &Client{
 		baseURL:      strings.TrimSuffix(baseURL, "/"),
@@ -147,6 +172,7 @@ func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentTyp
 			return nil, err
 		}
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+		req.Header.Set("User-Agent", "port-github-migrator")
 		return c.httpClient.Do(req)
 	}
 
@@ -245,16 +271,66 @@ func (c *Client) GetBlueprintsByDataSource(installationID string) ([]string, err
 	return result, nil
 }
 
-// searchEntitiesByBlueprint searches for entities with optional query
-func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]interface{}) ([]Entity, error) {
+// GetBlueprint fetches a blueprint by identifier
+func (c *Client) GetBlueprint(blueprintID string) (*Blueprint, error) {
+	resp, err := c.doAuthorizedRequest(
+		"GET",
+		fmt.Sprintf("%s/v1/blueprints/%s", c.baseURL, blueprintID),
+		nil,
+		"",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get blueprint failed: %s", string(body))
+	}
+
+	var bpResp BlueprintResponse
+	if err := json.NewDecoder(resp.Body).Decode(&bpResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &bpResp.Blueprint, nil
+}
+
+func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]any, options *SearchOptions) ([]Entity, error) {
 	allEntities := []Entity{}
-	limit := 200
+	opts := DefaultSearchOptions()
+	if options != nil {
+		opts = *options
+	}
+
+	limitPerPage := 1000
+	totalLimit := 5000
 	var next string
 	searchURL := fmt.Sprintf("%s/v1/blueprints/%s/entities/search", c.baseURL, blueprintID)
 
+	bp, err := c.GetBlueprint(blueprintID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch blueprint %s: %w", blueprintID, err)
+	}
+
+	include := []string{"$identifier"}
+	if opts.IncludeProperties {
+	for k := range bp.Schema.Properties {
+			include = append(include, k)
+		}
+	}
+
+	if opts.IncludeRelations {
+		for k := range bp.Relations {
+			include = append(include, k)
+		}
+	}
+
 	for {
-		reqBody := map[string]interface{}{
-			"limit": limit,
+		reqBody := map[string]any{
+			"limit":   limitPerPage,
+			"include": include,
 		}
 
 		if query != nil {
@@ -290,7 +366,7 @@ func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]
 
 		allEntities = append(allEntities, searchResp.Entities...)
 
-		if searchResp.Next == "" {
+		if searchResp.Next == "" || (opts.EnforceTotalLimit && len(allEntities) >= totalLimit) {
 			break
 		}
 
@@ -319,12 +395,12 @@ func oldGitHubAppEntityQuery(oldInstallationID string) map[string]interface{} {
 }
 
 // SearchOldEntitiesByBlueprint searches for old GitHub App entities
-func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID string) ([]Entity, error) {
-	return c.searchEntitiesByBlueprint(blueprintID, oldGitHubAppEntityQuery(oldInstallationID))
+func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID string, options *SearchOptions) ([]Entity, error) {
+	return c.searchEntitiesByBlueprint(blueprintID, oldGitHubAppEntityQuery(oldInstallationID), options)
 }
 
 // SearchNewEntitiesByBlueprint searches for new GitHub Ocean entities
-func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID string) ([]Entity, error) {
+func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID string, options *SearchOptions) ([]Entity, error) {
 	query := map[string]interface{}{
 		"combinator": "and",
 		"rules": []map[string]interface{}{
@@ -341,7 +417,7 @@ func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID str
 		},
 	}
 
-	return c.searchEntitiesByBlueprint(blueprintID, query)
+	return c.searchEntitiesByBlueprint(blueprintID, query, options)
 }
 
 // PatchEntitiesDatasourceBulk updates entities' datasource in bulk

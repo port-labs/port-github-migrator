@@ -52,10 +52,14 @@ func NewGetBlueprintsCommand() *cobra.Command {
 			fmt.Println("──────────────────────────────────────────")
 			for _, bp := range blueprints {
 				// Count entities for this blueprint
-				entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID)
+				entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID, &port.SearchOptions{
+					IncludeProperties: false,
+					IncludeRelations: false,
+					EnforceTotalLimit: false,
+				})
 				if err != nil {
 					// If we can't get count, just show the blueprint name
-					fmt.Printf("%-33s ?\n", bp)
+					fmt.Printf("%-33s %s\n", bp, err.Error())
 					continue
 				}
 				count := len(entities)

@@ -53,7 +53,7 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 
 	// Count entities for each blueprint
 	for _, bp := range blueprints {
-		entities, err := m.client.SearchOldEntitiesByBlueprint(bp, m.config.OldInstallationID)
+		entities, err := m.client.SearchOldEntitiesByBlueprint(bp, m.config.OldInstallationID, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to search entities for blueprint %s: %w", bp, err)
 		}
@@ -122,7 +122,7 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 // migrateBlueprint migrates a single blueprint
 func (m *Migrator) migrateBlueprint(blueprintID, newDatasourceID string) error {
 	// Get old entities
-	entities, err := m.client.SearchOldEntitiesByBlueprint(blueprintID, m.config.OldInstallationID)
+	entities, err := m.client.SearchOldEntitiesByBlueprint(blueprintID, m.config.OldInstallationID, nil)
 	if err != nil {
 		return fmt.Errorf("failed to search entities: %w", err)
 	}
