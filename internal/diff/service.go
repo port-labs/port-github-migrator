@@ -68,15 +68,29 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 		progressMu.Unlock()
 	}
 
+	// The target search must filter by the source identifiers, so it depends
+	// on the source search completing first. The two count calls are
+	// independent and run alongside both searches.
+	sourceDone := make(chan struct{})
+
 	wg.Add(4)
 	go func() {
 		defer wg.Done()
+		defer close(sourceDone)
 		sourceEntities, sourceErr = s.client.SearchOldEntitiesByBlueprint(sourceBP, oldInstallID, nil)
 		tickFetched()
 	}()
 	go func() {
 		defer wg.Done()
-		targetEntities, targetErr = s.client.SearchNewEntitiesByBlueprint(targetBP, newInstallID, nil)
+		<-sourceDone
+		if sourceErr != nil {
+			return
+		}
+		identifiers := make([]string, len(sourceEntities))
+		for i, e := range sourceEntities {
+			identifiers[i] = e.Identifier
+		}
+		targetEntities, targetErr = s.client.SearchNewEntitiesByBlueprint(targetBP, newInstallID, identifiers, nil)
 		tickFetched()
 	}()
 	go func() {
@@ -107,9 +121,11 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 	// Index entities
 	sourceMap := make(map[string]port.Entity)
 	targetMap := make(map[string]port.Entity)
+	sourceIdentifiers := make([]string, 0, len(sourceEntities))
 
 	for _, e := range sourceEntities {
 		sourceMap[e.Identifier] = e
+		sourceIdentifiers = append(sourceIdentifiers, e.Identifier)
 	}
 
 	for _, e := range targetEntities {
@@ -118,13 +134,14 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 
 	// Compare entities
 	result := &models.DiffResult{
-		SourceBlueprint: sourceBP,
-		TargetBlueprint: targetBP,
-		SourceTotal:     sourceTotal,
-		TargetTotal:     targetTotal,
-		SourceCompared:  len(sourceEntities),
-		TargetCompared:  len(targetEntities),
-		Changes:         []models.EntityChange{},
+		SourceBlueprint:   sourceBP,
+		TargetBlueprint:   targetBP,
+		SourceTotal:       sourceTotal,
+		TargetTotal:       targetTotal,
+		SourceIdentifiers: sourceIdentifiers,
+		SourceCompared:    len(sourceEntities),
+		TargetCompared:    len(targetEntities),
+		Changes:           []models.EntityChange{},
 	}
 
 	// Check common entities
@@ -154,18 +171,6 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 		}
 	}
 
-	// Check for orphaned entities (only in target)
-	for id := range targetMap {
-		if _, exists := sourceMap[id]; !exists {
-			result.Summary.Orphaned++
-			change := models.EntityChange{
-				Identifier: id,
-				Type:       "orphaned",
-			}
-			result.Changes = append(result.Changes, change)
-		}
-	}
-
 	return result, nil
 }
 
@@ -190,14 +195,6 @@ func (s *Service) PrintSummary(w io.Writer, result *models.DiffResult) {
 		}
 	}
 	fmt.Fprintf(w, "   📝 %d changed\n", result.Summary.Changed)
-	if result.Summary.Orphaned > 0 {
-		fmt.Fprintf(w, "   ❌ %d orphaned (only in new)\n", result.Summary.Orphaned)
-		for _, change := range result.Changes {
-			if change.Type == "orphaned" {
-				fmt.Fprintf(w, "       • %s\n", change.Identifier)
-			}
-		}
-	}
 	fmt.Fprintln(w)
 }
 

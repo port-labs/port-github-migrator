@@ -21,14 +21,15 @@ type MigrationStats struct {
 
 // DiffResult holds the comparison results
 type DiffResult struct {
-	SourceBlueprint string         `json:"sourceBlueprint"`
-	TargetBlueprint string         `json:"targetBlueprint"`
-	SourceTotal     int            `json:"sourceTotal"` // true total available in old install
-	TargetTotal     int            `json:"targetTotal"` // true total available in new install
-	SourceCompared  int            `json:"sourceCompared"`
-	TargetCompared  int            `json:"targetCompared"`
-	Summary         DiffSummary    `json:"summary"`
-	Changes         []EntityChange `json:"changes"`
+	SourceBlueprint   string         `json:"sourceBlueprint"`
+	TargetBlueprint   string         `json:"targetBlueprint"`
+	SourceTotal       int            `json:"sourceTotal"` // true total available in old install
+	TargetTotal       int            `json:"targetTotal"` // true total available in new install
+	SourceCompared    int            `json:"sourceCompared"`
+	TargetCompared    int            `json:"targetCompared"`
+	SourceIdentifiers []string       `json:"sourceIdentifiers,omitempty"` // identifiers actually compared on the source side
+	Summary           DiffSummary    `json:"summary"`
+	Changes           []EntityChange `json:"changes"`
 }
 
 // DiffSummary holds summary statistics
@@ -36,13 +37,12 @@ type DiffSummary struct {
 	Identical   int `json:"identical"`
 	NotMigrated int `json:"notMigrated"`
 	Changed     int `json:"changed"`
-	Orphaned    int `json:"orphaned"`
 }
 
 // EntityChange represents a single entity difference
 type EntityChange struct {
 	Identifier    string                  `json:"identifier"`
-	Type          string                  `json:"type"` // "identical", "changed", "notMigrated", "orphaned"
+	Type          string                  `json:"type"` // "identical", "changed", "notMigrated"
 	OldEntity     map[string]interface{}  `json:"oldEntity,omitempty"`
 	NewEntity     map[string]interface{}  `json:"newEntity,omitempty"`
 	PropertyDiffs map[string]PropertyDiff `json:"propertyDiffs,omitempty"`

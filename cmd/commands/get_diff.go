@@ -8,6 +8,7 @@ import (
 
 	"github.com/port-labs/port-github-migrator/internal/diff"
 	"github.com/port-labs/port-github-migrator/internal/port"
+	"github.com/port-labs/port-github-migrator/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -86,6 +87,12 @@ func NewGetDiffCommand() *cobra.Command {
 
 			if outputPath != "" {
 				fmt.Fprintf(cmd.OutOrStderr(), "📝 Wrote diff to %s\n", outputPath)
+			}
+
+			if st, err := store.Open(); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  Could not open local cache, identifiers not saved: %v\n", err)
+			} else if _, err := st.SaveIdentifiers(oldInstallID, sourceBlueprint, result.SourceIdentifiers); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  Failed to save identifiers: %v\n", err)
 			}
 
 			return nil

@@ -7,6 +7,7 @@ import (
 	"github.com/port-labs/port-github-migrator/internal/migrator"
 	"github.com/port-labs/port-github-migrator/internal/models"
 	"github.com/port-labs/port-github-migrator/internal/port"
+	"github.com/port-labs/port-github-migrator/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -77,8 +78,14 @@ func NewMigrateCommand() *cobra.Command {
 				NewInstallationID: newInstallID,
 			}
 
-			// Create migrator
-			mig := migrator.NewMigrator(client, config)
+			// Open the local manifest store; if it can't be opened we still
+			// migrate, just without the get-diff manifest contract.
+			st, storeErr := store.Open()
+			if storeErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  Could not open local cache, manifests will be ignored: %v\n", storeErr)
+			}
+
+			mig := migrator.NewMigrator(client, config, st)
 
 		// If migrating "all", show blueprints with entity counts first
 		if all {

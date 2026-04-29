@@ -467,21 +467,31 @@ func oldGitHubAppEntityQuery(oldInstallationID string) map[string]interface{} {
 	}
 }
 
-func newGitHubOceanEntityQuery(newInstallationID string) map[string]interface{} {
-	return map[string]interface{}{
-		"combinator": "and",
-		"rules": []map[string]any{
-			{
-				"property": "$datasource",
-				"operator": "contains",
-				"value":    "port-ocean/github-ocean",
-			},
-			{
-				"property": "$datasource",
-				"operator": "contains",
-				"value":    fmt.Sprintf("%s/exporter", newInstallationID),
-			},
+func newGitHubOceanEntityQuery(newInstallationID string, oldIdentifiers []string) map[string]any {
+	rules := []map[string]any{
+		{
+			"property": "$datasource",
+			"operator": "contains",
+			"value":    "port-ocean/github-ocean",
 		},
+		{
+			"property": "$datasource",
+			"operator": "contains",
+			"value":    fmt.Sprintf("%s/exporter", newInstallationID),
+		},
+	}
+
+	if oldIdentifiers != nil {
+		rules = append(rules, map[string]any{
+			"property": "$identifier",
+			"operator": "in",
+			"value":    oldIdentifiers,
+		})
+	}
+
+	return map[string]any{
+		"combinator": "and",
+		"rules":      rules,
 	}
 }
 
@@ -491,8 +501,8 @@ func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID str
 }
 
 // SearchNewEntitiesByBlueprint searches for new GitHub Ocean entities
-func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID string, options *SearchOptions) ([]Entity, error) {
-	return c.searchEntitiesByBlueprint(blueprintID, newGitHubOceanEntityQuery(newInstallationID), options)
+func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID string, oldIdentifiers []string, options *SearchOptions) ([]Entity, error) {
+	return c.searchEntitiesByBlueprint(blueprintID, newGitHubOceanEntityQuery(newInstallationID, oldIdentifiers), options)
 }
 
 // GroupCount represents a single bucket returned by the entities/group endpoint
@@ -557,7 +567,7 @@ func (c *Client) CountOldEntitiesByBlueprint(blueprintID, oldInstallationID stri
 
 // CountNewEntitiesByBlueprint counts entities ingested by the new GitHub Ocean installation
 func (c *Client) CountNewEntitiesByBlueprint(blueprintID, newInstallationID string) (int, error) {
-	return c.CountEntitiesByBlueprint(blueprintID, newGitHubOceanEntityQuery(newInstallationID))
+	return c.CountEntitiesByBlueprint(blueprintID, newGitHubOceanEntityQuery(newInstallationID, nil))
 }
 
 // PatchEntitiesDatasourceBulk updates entities' datasource in bulk
