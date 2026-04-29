@@ -67,7 +67,7 @@ func NewGetDiffCommand() *cobra.Command {
 			diffService := diff.NewService(client)
 
 			// Run comparison
-			result, err := diffService.CompareBlueprints(sourceBlueprint, targetBlueprint, oldInstallID, newInstallID)
+			result, err := diffService.CompareBlueprints(sourceBlueprint, targetBlueprint, oldInstallID, newInstallID, cmd.ErrOrStderr())
 			if err != nil {
 				return fmt.Errorf("failed to compare blueprints: %w", err)
 			}

@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sync"
+	"time"
 
+	"github.com/briandowns/spinner"
 	"github.com/port-labs/port-github-migrator/internal/models"
 	"github.com/port-labs/port-github-migrator/internal/port"
 )
@@ -20,19 +23,86 @@ func NewService(client *port.Client) *Service {
 	return &Service{client: client}
 }
 
-// CompareBlueprints compares entities between source and target blueprints
-func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstallID string) (*models.DiffResult, error) {
-	// Get source entities (old installation)
-	sourceEntities, err := s.client.SearchOldEntitiesByBlueprint(sourceBP, oldInstallID, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get source entities: %w", err)
+// CompareBlueprints compares entities between source and target blueprints.
+// Source and target searches run concurrently. A spinner is rendered to
+// spinnerOut while the requests are in flight; pass io.Discard to disable it.
+func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstallID string, spinnerOut io.Writer) (*models.DiffResult, error) {
+	sp := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+	sp.Writer = spinnerOut
+	sp.HideCursor = true
+
+	var (
+		progressMu sync.Mutex
+		fetched    int
+	)
+	setFetchSuffix := func() {
+		sp.Lock()
+		sp.Suffix = fmt.Sprintf(" Fetching entities for %s and %s (%d/2)", sourceBP, targetBP, fetched)
+		sp.Unlock()
+	}
+	setDiffSuffix := func() {
+		sp.Lock()
+		sp.Suffix = fmt.Sprintf(" Performing diff between %s and %s", sourceBP, targetBP)
+		sp.Unlock()
+	}
+	setFetchSuffix()
+	sp.Start()
+	defer sp.Stop()
+
+	var (
+		sourceEntities []port.Entity
+		targetEntities []port.Entity
+		sourceTotal    int
+		targetTotal    int
+		sourceErr      error
+		targetErr      error
+		sourceCountErr error
+		targetCountErr error
+		wg             sync.WaitGroup
+	)
+
+	tickFetched := func() {
+		progressMu.Lock()
+		fetched++
+		setFetchSuffix()
+		progressMu.Unlock()
 	}
 
-	// Get target entities (new installation)
-	targetEntities, err := s.client.SearchNewEntitiesByBlueprint(targetBP, newInstallID, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get target entities: %w", err)
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		sourceEntities, sourceErr = s.client.SearchOldEntitiesByBlueprint(sourceBP, oldInstallID, nil)
+		tickFetched()
+	}()
+	go func() {
+		defer wg.Done()
+		targetEntities, targetErr = s.client.SearchNewEntitiesByBlueprint(targetBP, newInstallID, nil)
+		tickFetched()
+	}()
+	go func() {
+		defer wg.Done()
+		sourceTotal, sourceCountErr = s.client.CountOldEntitiesByBlueprint(sourceBP, oldInstallID)
+	}()
+	go func() {
+		defer wg.Done()
+		targetTotal, targetCountErr = s.client.CountNewEntitiesByBlueprint(targetBP, newInstallID)
+	}()
+	wg.Wait()
+
+	if sourceErr != nil {
+		return nil, fmt.Errorf("failed to get source entities: %w", sourceErr)
 	}
+	if targetErr != nil {
+		return nil, fmt.Errorf("failed to get target entities: %w", targetErr)
+	}
+	if sourceCountErr != nil {
+		return nil, fmt.Errorf("failed to count source entities: %w", sourceCountErr)
+	}
+	if targetCountErr != nil {
+		return nil, fmt.Errorf("failed to count target entities: %w", targetCountErr)
+	}
+
+	setDiffSuffix()
 
 	// Index entities
 	sourceMap := make(map[string]port.Entity)
@@ -50,29 +120,25 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 	result := &models.DiffResult{
 		SourceBlueprint: sourceBP,
 		TargetBlueprint: targetBP,
+		SourceTotal:     sourceTotal,
+		TargetTotal:     targetTotal,
+		SourceCompared:  len(sourceEntities),
+		TargetCompared:  len(targetEntities),
 		Changes:         []models.EntityChange{},
-	}
-
-	excludedProps := map[string]bool{
-		"blueprint": true,
-		"createdAt": true,
-		"updatedAt": true,
-		"createdBy": true,
-		"updatedBy": true,
 	}
 
 	// Check common entities
 	for id, sourceEntity := range sourceMap {
 		if targetEntity, exists := targetMap[id]; exists {
 			// Entity exists in both
-			if entitiesEqual(sourceEntity, targetEntity, excludedProps) {
+			if entitiesEqual(sourceEntity, targetEntity) {
 				result.Summary.Identical++
 			} else {
 				result.Summary.Changed++
 				change := models.EntityChange{
 					Identifier: id,
 					Type:       "changed",
-					PropertyDiffs: getPropertyDiffs(sourceEntity, targetEntity, excludedProps),
+					PropertyDiffs: getPropertyDiffs(sourceEntity, targetEntity),
 				}
 				result.Changes = append(result.Changes, change)
 			}
@@ -108,6 +174,12 @@ func (s *Service) PrintSummary(w io.Writer, result *models.DiffResult) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "📊 %s (old) → %s (new)\n", result.SourceBlueprint, result.TargetBlueprint)
 	fmt.Fprintln(w, "   "+repeatString("─", 40))
+	if result.SourceCompared < result.SourceTotal {
+		fmt.Fprintf(w, "   ⚠️  source: compared %d / %d (capped)\n", result.SourceCompared, result.SourceTotal)
+	}
+	if result.TargetCompared < result.TargetTotal {
+		fmt.Fprintf(w, "   ⚠️  target: compared %d / %d (capped)\n", result.TargetCompared, result.TargetTotal)
+	}
 	fmt.Fprintf(w, "   ✅ %d identical\n", result.Summary.Identical)
 	if result.Summary.NotMigrated > 0 {
 		fmt.Fprintf(w, "   ⚠️  %d not migrated (only in old)\n", result.Summary.NotMigrated)
@@ -173,17 +245,14 @@ func (s *Service) PrintDetailedDiffs(w io.Writer, changes []models.EntityChange,
 
 // Helper functions
 
-func entitiesEqual(e1, e2 port.Entity, excluded map[string]bool) bool {
+func entitiesEqual(e1, e2 port.Entity) bool {
 	// Compare title
 	if e1.Title != e2.Title {
 		return false
 	}
 
 	// Compare properties (excluding specific fields)
-	m1 := filterProperties(e1.Properties, excluded)
-	m2 := filterProperties(e2.Properties, excluded)
-
-	if !reflect.DeepEqual(m1, m2) {
+	if !reflect.DeepEqual(e1.Properties, e2.Properties) {
 		return false
 	}
 
@@ -191,17 +260,7 @@ func entitiesEqual(e1, e2 port.Entity, excluded map[string]bool) bool {
 	return reflect.DeepEqual(e1.Relations, e2.Relations)
 }
 
-func filterProperties(props map[string]interface{}, excluded map[string]bool) map[string]interface{} {
-	result := make(map[string]interface{})
-	for k, v := range props {
-		if !excluded[k] {
-			result[k] = v
-		}
-	}
-	return result
-}
-
-func getPropertyDiffs(e1, e2 port.Entity, excluded map[string]bool) map[string]models.PropertyDiff {
+func getPropertyDiffs(e1, e2 port.Entity) map[string]models.PropertyDiff {
 	diffs := make(map[string]models.PropertyDiff)
 
 	// Check title
@@ -212,12 +271,9 @@ func getPropertyDiffs(e1, e2 port.Entity, excluded map[string]bool) map[string]m
 		}
 	}
 
-	m1 := filterProperties(e1.Properties, excluded)
-	m2 := filterProperties(e2.Properties, excluded)
-
 	// Check e1 properties
-	for k, v1 := range m1 {
-		v2, exists := m2[k]
+	for k, v1 := range e1.Properties {
+		v2, exists := e2.Properties[k]
 		if !exists || !reflect.DeepEqual(v1, v2) {
 			diffs["properties."+k] = models.PropertyDiff{
 				OldValue: v1,
@@ -227,8 +283,8 @@ func getPropertyDiffs(e1, e2 port.Entity, excluded map[string]bool) map[string]m
 	}
 
 	// Check e2 properties for new fields
-	for k, v2 := range m2 {
-		if _, exists := m1[k]; !exists {
+	for k, v2 := range e2.Properties {
+		if _, exists := e1.Properties[k]; !exists {
 			diffs["properties."+k] = models.PropertyDiff{
 				OldValue: nil,
 				NewValue: v2,

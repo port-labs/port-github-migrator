@@ -42,7 +42,7 @@ func NewGetBlueprintsCommand() *cobra.Command {
 				return err
 			}
 
-			blueprints.PrintCounts(cmd.OutOrStdout(), counts, includeEmpty)
+			blueprints.PrintCounts(cmd.OutOrStdout(), counts, includeEmpty, false)
 
 			return nil
 		},

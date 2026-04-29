@@ -12,7 +12,13 @@ import (
 	"time"
 )
 
-const maxRetries = 3
+const (
+	maxRetries = 3
+
+	// MaxSearchResults caps the number of entities returned by a single
+	// searchEntitiesByBlueprint call when SearchOptions.EnforceTotalLimit is true.
+	MaxSearchResults = 5000
+)
 
 // Client handles all Port API interactions
 type Client struct {
@@ -90,6 +96,7 @@ type BlueprintResponse struct {
 }
 
 type SearchOptions struct {
+	IncludeTitle bool
     IncludeProperties bool
     IncludeRelations  bool
     EnforceTotalLimit bool
@@ -97,6 +104,7 @@ type SearchOptions struct {
 
 func DefaultSearchOptions() SearchOptions {
     return SearchOptions{
+        IncludeTitle: true,
         IncludeProperties: true,
         IncludeRelations:  true,
         EnforceTotalLimit: true,
@@ -367,7 +375,6 @@ func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]
 	}
 
 	limitPerPage := 1000
-	totalLimit := 5000
 	var next string
 	searchURL := fmt.Sprintf("%s/v1/blueprints/%s/entities/search", c.baseURL, blueprintID)
 
@@ -377,6 +384,10 @@ func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]
 	}
 
 	include := []string{"$identifier"}
+	if opts.IncludeTitle {
+		include = append(include, "$title")
+	}
+
 	if opts.IncludeProperties {
 	for k := range bp.Schema.Properties {
 			include = append(include, k)
@@ -428,7 +439,7 @@ func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]
 
 		allEntities = append(allEntities, searchResp.Entities...)
 
-		if searchResp.Next == "" || (opts.EnforceTotalLimit && len(allEntities) >= totalLimit) {
+		if searchResp.Next == "" || (opts.EnforceTotalLimit && len(allEntities) >= MaxSearchResults) {
 			break
 		}
 
@@ -456,16 +467,10 @@ func oldGitHubAppEntityQuery(oldInstallationID string) map[string]interface{} {
 	}
 }
 
-// SearchOldEntitiesByBlueprint searches for old GitHub App entities
-func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID string, options *SearchOptions) ([]Entity, error) {
-	return c.searchEntitiesByBlueprint(blueprintID, oldGitHubAppEntityQuery(oldInstallationID), options)
-}
-
-// SearchNewEntitiesByBlueprint searches for new GitHub Ocean entities
-func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID string, options *SearchOptions) ([]Entity, error) {
-	query := map[string]interface{}{
+func newGitHubOceanEntityQuery(newInstallationID string) map[string]interface{} {
+	return map[string]interface{}{
 		"combinator": "and",
-		"rules": []map[string]interface{}{
+		"rules": []map[string]any{
 			{
 				"property": "$datasource",
 				"operator": "contains",
@@ -478,8 +483,81 @@ func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID str
 			},
 		},
 	}
+}
 
-	return c.searchEntitiesByBlueprint(blueprintID, query, options)
+// SearchOldEntitiesByBlueprint searches for old GitHub App entities
+func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID string, options *SearchOptions) ([]Entity, error) {
+	return c.searchEntitiesByBlueprint(blueprintID, oldGitHubAppEntityQuery(oldInstallationID), options)
+}
+
+// SearchNewEntitiesByBlueprint searches for new GitHub Ocean entities
+func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID string, options *SearchOptions) ([]Entity, error) {
+	return c.searchEntitiesByBlueprint(blueprintID, newGitHubOceanEntityQuery(newInstallationID), options)
+}
+
+// GroupCount represents a single bucket returned by the entities/group endpoint
+type GroupCount struct {
+	Value string `json:"value"`
+	Count int    `json:"count"`
+}
+
+// GroupResponse represents the response of the entities/group endpoint
+type GroupResponse struct {
+	Groups        []GroupCount `json:"groups"`
+	HasMoreGroups bool         `json:"hasMoreGroups"`
+}
+
+// CountEntitiesByBlueprint returns the total number of entities matching `query`
+// in a blueprint, using the entities/group aggregate endpoint. This is much
+// cheaper than paginating /entities/search just to count.
+func (c *Client) CountEntitiesByBlueprint(blueprintID string, query map[string]interface{}) (int, error) {
+	body := map[string]any{
+		"query": query,
+		"groupBy": map[string]any{
+			"property": "$blueprint",
+		},
+	}
+
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+
+	resp, err := c.doAuthorizedRequest(
+		"POST",
+		fmt.Sprintf("%s/v1/blueprints/%s/entities/group", c.baseURL, blueprintID),
+		bodyBytes,
+		"application/json",
+	)
+	if err != nil {
+		return 0, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("count failed: %s", string(b))
+	}
+
+	var gr GroupResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(gr.Groups) == 0 {
+		return 0, nil
+	}
+	return gr.Groups[0].Count, nil
+}
+
+// CountOldEntitiesByBlueprint counts entities ingested by the old GitHub App installation
+func (c *Client) CountOldEntitiesByBlueprint(blueprintID, oldInstallationID string) (int, error) {
+	return c.CountEntitiesByBlueprint(blueprintID, oldGitHubAppEntityQuery(oldInstallationID))
+}
+
+// CountNewEntitiesByBlueprint counts entities ingested by the new GitHub Ocean installation
+func (c *Client) CountNewEntitiesByBlueprint(blueprintID, newInstallationID string) (int, error) {
+	return c.CountEntitiesByBlueprint(blueprintID, newGitHubOceanEntityQuery(newInstallationID))
 }
 
 // PatchEntitiesDatasourceBulk updates entities' datasource in bulk

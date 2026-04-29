@@ -22,8 +22,9 @@ type Count struct {
 }
 
 // FetchCounts loads the blueprints reachable from the given installation and
-// concurrently counts the entities ingested under each, with a live spinner
-// rendered to spinnerOut (typically stderr).
+// concurrently counts the entities ingested under each via the entities/group
+// aggregate endpoint, with a live spinner rendered to spinnerOut (typically
+// stderr).
 func FetchCounts(client *port.Client, oldInstallID string, spinnerOut io.Writer) ([]Count, error) {
 	blueprints, err := client.GetBlueprintsByDataSource(oldInstallID)
 	if err != nil {
@@ -35,12 +36,6 @@ func FetchCounts(client *port.Client, oldInstallID string, spinnerOut io.Writer)
 	results := make([]Count, len(blueprints))
 	sem := make(chan struct{}, fetchConcurrency)
 	var wg sync.WaitGroup
-
-	searchOpts := &port.SearchOptions{
-		IncludeProperties: false,
-		IncludeRelations:  false,
-		EnforceTotalLimit: false,
-	}
 
 	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 	s.Writer = spinnerOut
@@ -65,7 +60,7 @@ func FetchCounts(client *port.Client, oldInstallID string, spinnerOut io.Writer)
 			label = strings.Join(names[:preview], ", ") + fmt.Sprintf(" (+%d more)", len(names)-preview)
 		}
 		s.Lock()
-		s.Suffix = fmt.Sprintf(" Fetching entities (%d/%d) — %s", completed, len(blueprints), label)
+		s.Suffix = fmt.Sprintf(" Counting entities (%d/%d) — %s", completed, len(blueprints), label)
 		s.Unlock()
 	}
 
@@ -84,7 +79,7 @@ func FetchCounts(client *port.Client, oldInstallID string, spinnerOut io.Writer)
 			refreshSuffix()
 			progressMu.Unlock()
 
-			entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID, searchOpts)
+			count, err := client.CountOldEntitiesByBlueprint(bp, oldInstallID)
 
 			progressMu.Lock()
 			delete(inFlight, bp)
@@ -96,7 +91,7 @@ func FetchCounts(client *port.Client, oldInstallID string, spinnerOut io.Writer)
 				results[i] = Count{Name: bp, Err: err}
 				return
 			}
-			results[i] = Count{Name: bp, Count: len(entities)}
+			results[i] = Count{Name: bp, Count: count}
 		}(i, bp)
 	}
 	wg.Wait()
@@ -105,9 +100,12 @@ func FetchCounts(client *port.Client, oldInstallID string, spinnerOut io.Writer)
 	return results, nil
 }
 
-// PrintCounts renders the standard NAME / ENTITIES table. When includeEmpty is
-// false, blueprints with 0 entities are omitted.
-func PrintCounts(w io.Writer, counts []Count, includeEmpty bool) {
+// PrintCounts renders the standard NAME / ENTITIES table.
+//   - When includeEmpty is false, blueprints with 0 entities are omitted.
+//   - When showCap is true, blueprints whose count exceeds port.MaxSearchResults
+//     are rendered as "5000 / <total>" to indicate that downstream operations
+//     (migrate / get-diff) only process the first 5000 entities.
+func PrintCounts(w io.Writer, counts []Count, includeEmpty, showCap bool) {
 	fmt.Fprintln(w, "NAME                              ENTITIES")
 	fmt.Fprintln(w, "──────────────────────────────────────────")
 	for _, r := range counts {
@@ -118,6 +116,10 @@ func PrintCounts(w io.Writer, counts []Count, includeEmpty bool) {
 		if r.Count == 0 && !includeEmpty {
 			continue
 		}
-		fmt.Fprintf(w, "%-33s %d\n", r.Name, r.Count)
+		if showCap && r.Count > port.MaxSearchResults {
+			fmt.Fprintf(w, "%-33s %d / %d\n", r.Name, port.MaxSearchResults, r.Count)
+		} else {
+			fmt.Fprintf(w, "%-33s %d\n", r.Name, r.Count)
+		}
 	}
 }

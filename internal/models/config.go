@@ -23,6 +23,10 @@ type MigrationStats struct {
 type DiffResult struct {
 	SourceBlueprint string         `json:"sourceBlueprint"`
 	TargetBlueprint string         `json:"targetBlueprint"`
+	SourceTotal     int            `json:"sourceTotal"` // true total available in old install
+	TargetTotal     int            `json:"targetTotal"` // true total available in new install
+	SourceCompared  int            `json:"sourceCompared"`
+	TargetCompared  int            `json:"targetCompared"`
 	Summary         DiffSummary    `json:"summary"`
 	Changes         []EntityChange `json:"changes"`
 }
