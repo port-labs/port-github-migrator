@@ -3,6 +3,7 @@ package diff
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 
 	"github.com/port-labs/port-github-migrator/internal/models"
@@ -102,35 +103,34 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 	return result, nil
 }
 
-// PrintSummary prints the diff summary with entity identifiers
-func (s *Service) PrintSummary(result *models.DiffResult) {
-	fmt.Println()
-	fmt.Printf("📊 %s (old) → %s (new)\n", result.SourceBlueprint, result.TargetBlueprint)
-	fmt.Println("   " + repeatString("─", 40))
-	fmt.Printf("   ✅ %d identical\n", result.Summary.Identical)
+// PrintSummary writes the diff summary with entity identifiers to w
+func (s *Service) PrintSummary(w io.Writer, result *models.DiffResult) {
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "📊 %s (old) → %s (new)\n", result.SourceBlueprint, result.TargetBlueprint)
+	fmt.Fprintln(w, "   "+repeatString("─", 40))
+	fmt.Fprintf(w, "   ✅ %d identical\n", result.Summary.Identical)
 	if result.Summary.NotMigrated > 0 {
-		fmt.Printf("   ⚠️  %d not migrated (only in old)\n", result.Summary.NotMigrated)
+		fmt.Fprintf(w, "   ⚠️  %d not migrated (only in old)\n", result.Summary.NotMigrated)
 		for _, change := range result.Changes {
 			if change.Type == "notMigrated" {
-				fmt.Printf("       • %s\n", change.Identifier)
+				fmt.Fprintf(w, "       • %s\n", change.Identifier)
 			}
 		}
 	}
-	fmt.Printf("   📝 %d changed\n", result.Summary.Changed)
+	fmt.Fprintf(w, "   📝 %d changed\n", result.Summary.Changed)
 	if result.Summary.Orphaned > 0 {
-		fmt.Printf("   ❌ %d orphaned (only in new)\n", result.Summary.Orphaned)
+		fmt.Fprintf(w, "   ❌ %d orphaned (only in new)\n", result.Summary.Orphaned)
 		for _, change := range result.Changes {
 			if change.Type == "orphaned" {
-				fmt.Printf("       • %s\n", change.Identifier)
+				fmt.Fprintf(w, "       • %s\n", change.Identifier)
 			}
 		}
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
-// PrintDetailedDiffs prints detailed property diffs for changed entities
-func (s *Service) PrintDetailedDiffs(changes []models.EntityChange, limit int) {
-	// Count changed entities
+// PrintDetailedDiffs writes detailed property diffs for changed entities to w
+func (s *Service) PrintDetailedDiffs(w io.Writer, changes []models.EntityChange, limit int) {
 	changedCount := 0
 	for _, change := range changes {
 		if change.Type == "changed" {
@@ -142,8 +142,7 @@ func (s *Service) PrintDetailedDiffs(changes []models.EntityChange, limit int) {
 		return
 	}
 
-	fmt.Println("📋 Changed Entities (showing first " + fmt.Sprintf("%d", limit) + "):")
-	fmt.Println()
+	fmt.Fprintf(w, "📋 Changed Entities (showing first %d):\n\n", limit)
 
 	shown := 0
 	for _, change := range changes {
@@ -152,25 +151,24 @@ func (s *Service) PrintDetailedDiffs(changes []models.EntityChange, limit int) {
 		}
 
 		if shown >= limit {
-			fmt.Printf("⏭️  Showing %d of %d changed entities. Use --limit to show more.\n", limit, changedCount)
+			fmt.Fprintf(w, "⏭️  Showing %d of %d changed entities. Use --limit to show more.\n", limit, changedCount)
 			break
 		}
 
 		if shown > 0 {
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
 
-		fmt.Printf("  • %s\n", change.Identifier)
-		// Flatten nested diffs into dot-notation paths
+		fmt.Fprintf(w, "  • %s\n", change.Identifier)
 		flatDiffs := flattenDiffs(change.PropertyDiffs)
 		for _, path := range flatDiffs {
-			fmt.Printf("    - %s: %v\n", path.Path, path.OldValue)
-			fmt.Printf("    + %s: %v\n", path.Path, path.NewValue)
+			fmt.Fprintf(w, "    - %s: %v\n", path.Path, path.OldValue)
+			fmt.Fprintf(w, "    + %s: %v\n", path.Path, path.NewValue)
 		}
 		shown++
 	}
 
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
 // Helper functions

@@ -3,10 +3,11 @@ package commands
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
+	"github.com/port-labs/port-github-migrator/internal/blueprints"
 	"github.com/port-labs/port-github-migrator/internal/migrator"
 	"github.com/port-labs/port-github-migrator/internal/models"
 	"github.com/port-labs/port-github-migrator/internal/port"
+	"github.com/spf13/cobra"
 )
 
 func NewMigrateCommand() *cobra.Command {
@@ -81,31 +82,14 @@ func NewMigrateCommand() *cobra.Command {
 
 		// If migrating "all", show blueprints with entity counts first
 		if all {
-			fmt.Println("📋 Blueprints to migrate:")
-			fmt.Println("NAME                              ENTITIES")
-			fmt.Println("──────────────────────────────────────────")
-			
-			blueprints, err := client.GetBlueprintsByDataSource(oldInstallID)
+			fmt.Fprintln(cmd.OutOrStdout(), "📋 Blueprints to migrate:")
+
+			counts, err := blueprints.FetchCounts(client, oldInstallID, cmd.ErrOrStderr())
 			if err != nil {
-				return fmt.Errorf("failed to get blueprints: %w", err)
+				return err
 			}
-			
-			for _, bp := range blueprints {
-				entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID, nil)
-				if err != nil {
-					fmt.Printf("%-33s ?\n", bp)
-					continue
-				}
-				count := len(entities)
-				
-				// Skip empty blueprints (no entities to migrate)
-				if count == 0 {
-					continue
-				}
-				
-				fmt.Printf("%-33s %d\n", bp, count)
-			}
-			fmt.Println()
+			blueprints.PrintCounts(cmd.OutOrStdout(), counts, false)
+			fmt.Fprintln(cmd.OutOrStdout())
 		}
 
 		// Determine if migrating single blueprint or all

@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
+
+const maxRetries = 3
 
 // Client handles all Port API interactions
 type Client struct {
@@ -155,7 +159,39 @@ func (c *Client) getToken() (string, error) {
 }
 
 func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentType string) (*http.Response, error) {
-	attempt := func() (*http.Response, error) {
+	var lastErr error
+
+	for i := 0; i <= maxRetries; i++ {
+		resp, err := c.attemptWithAuth(method, url, body, contentType)
+		if err != nil {
+			lastErr = err
+			if i == maxRetries {
+				break
+			}
+			time.Sleep(backoff(i, 0))
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			wait := retryAfter(resp.Header.Get("x-ratelimit-reset"))
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("port returned status %d", resp.StatusCode)
+			if i == maxRetries {
+				break
+			}
+			time.Sleep(backoff(i, wait))
+			continue
+		}
+
+		return resp, nil
+	}
+
+	return nil, fmt.Errorf("request failed after %d retries: %w", maxRetries, lastErr)
+}
+
+func (c *Client) attemptWithAuth(method, url string, body []byte, contentType string) (*http.Response, error) {
+	do := func() (*http.Response, error) {
 		var r io.Reader
 		if len(body) > 0 {
 			r = bytes.NewReader(body)
@@ -176,7 +212,7 @@ func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentTyp
 		return c.httpClient.Do(req)
 	}
 
-	resp, err := attempt()
+	resp, err := do()
 	if err != nil {
 		return nil, err
 	}
@@ -186,9 +222,35 @@ func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentTyp
 		if _, err := c.fetchAccessToken(); err != nil {
 			return nil, err
 		}
-		return attempt()
+		return do()
 	}
 	return resp, nil
+}
+
+// backoff returns an exponential backoff with jitter, or `hint` if it's positive
+// (used to honor the server's Retry-After header).
+func backoff(attempt int, hint time.Duration) time.Duration {
+	if hint > 0 {
+		return hint
+	}
+	base := time.Duration(1<<attempt) * time.Second
+	jitter := time.Duration(rand.Int63n(int64(500 * time.Millisecond)))
+	return base + jitter
+}
+
+func retryAfter(h string) time.Duration {
+	if h == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(strings.TrimSpace(h)); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // GetIntegrationVersion fetches the version of an integration
