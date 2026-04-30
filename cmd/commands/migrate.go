@@ -60,14 +60,22 @@ func NewMigrateCommand() *cobra.Command {
 			// Create Port client
 			client := port.NewClient(portURL, clientID, clientSecret)
 
-			// Get integration version
-			version, err := client.GetIntegrationVersion(newInstallID)
+			// Fetch the new integration. We need its version for the datasource id
+			// and its config for the entityDeletionThreshold safety check.
+			intg, err := client.GetIntegration(newInstallID)
 			if err != nil {
-				return fmt.Errorf("failed to get integration version: %w", err)
+				return fmt.Errorf("failed to get integration: %w", err)
+			}
+			if intg.Version == "" {
+				return fmt.Errorf("integration version not found")
+			}
+
+			if err := requireZeroDeletionThreshold(intg); err != nil {
+				return err
 			}
 
 			// Construct new datasource ID
-			newDatasourceID := fmt.Sprintf("port-ocean/github-ocean/%s/%s/exporter", version, newInstallID)
+			newDatasourceID := fmt.Sprintf("port-ocean/github-ocean/%s/%s/exporter", intg.Version, newInstallID)
 
 			// Create config
 			config := &models.Config{
@@ -115,4 +123,26 @@ func NewMigrateCommand() *cobra.Command {
 	cmd.Flags().Bool("all", false, "Migrate all blueprints with entities")
 
 	return cmd
+}
+
+// requireZeroDeletionThreshold enforces that the GitHub Ocean integration's
+// mapping config has `entityDeletionThreshold` explicitly set to 0, so that
+// the next resync after migration does not delete the freshly re-owned
+// entities.
+func requireZeroDeletionThreshold(intg *port.Integration) error {
+	const key = "entityDeletionThreshold"
+	const remediation = "Set `entityDeletionThreshold: 0` in the GitHub Ocean integration's mapping config and try again."
+
+	raw, ok := intg.Config[key]
+	if !ok {
+		return fmt.Errorf("❌ %s is not set in the new GitHub Ocean integration's mapping config; without it, the next resync may delete migrated entities, because it's using the temp blueprint. %s", key, remediation)
+	}
+	n, ok := raw.(float64)
+	if !ok {
+		return fmt.Errorf("❌ %s in the new GitHub Ocean integration's mapping config is %v (expected 0). %s", key, raw, remediation)
+	}
+	if n != 0 {
+		return fmt.Errorf("❌ %s in the new GitHub Ocean integration's mapping config is %v; it must be 0 to prevent migrated entities from being deleted on the next resync. %s", key, n, remediation)
+	}
+	return nil
 }

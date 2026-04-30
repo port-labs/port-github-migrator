@@ -36,11 +36,16 @@ type AuthResponse struct {
 	ExpiresIn   int    `json:"expiresIn"`
 }
 
-// IntegrationResponse represents integration details
+// Integration represents a Port integration / installation as returned by
+// GET /v1/integration/{installationId}.
+type Integration struct {
+	Version string         `json:"version"`
+	Config  map[string]any `json:"config"`
+}
+
+// IntegrationResponse is the wire envelope returned by the integration endpoint.
 type IntegrationResponse struct {
-	Integration struct {
-		Version string `json:"version"`
-	} `json:"integration"`
+	Integration Integration `json:"integration"`
 }
 
 // DataSourceResponse represents datasources from Port
@@ -261,8 +266,9 @@ func retryAfter(h string) time.Duration {
 	return 0
 }
 
-// GetIntegrationVersion fetches the version of an integration
-func (c *Client) GetIntegrationVersion(installationID string) (string, error) {
+// GetIntegration fetches the full integration (version + config) for the
+// given installation.
+func (c *Client) GetIntegration(installationID string) (*Integration, error) {
 	resp, err := c.doAuthorizedRequest(
 		"GET",
 		fmt.Sprintf("%s/v1/integration/%s", c.baseURL, installationID),
@@ -270,29 +276,25 @@ func (c *Client) GetIntegrationVersion(installationID string) (string, error) {
 		"",
 	)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("integration not found")
+		return nil, fmt.Errorf("integration not found")
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("request failed: %s", string(body))
+		return nil, fmt.Errorf("request failed: %s", string(body))
 	}
 
 	var intResp IntegrationResponse
 	if err := json.NewDecoder(resp.Body).Decode(&intResp); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	if intResp.Integration.Version == "" {
-		return "", fmt.Errorf("integration version not found")
-	}
-
-	return intResp.Integration.Version, nil
+	return &intResp.Integration, nil
 }
 
 // GetBlueprintsByDataSource fetches all blueprints for an installation
