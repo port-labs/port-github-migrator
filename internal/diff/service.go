@@ -52,11 +52,9 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 		sourceEntities []port.Entity
 		targetEntities []port.Entity
 		sourceTotal    int
-		targetTotal    int
 		sourceErr      error
 		targetErr      error
 		sourceCountErr error
-		targetCountErr error
 		wg             sync.WaitGroup
 	)
 
@@ -68,11 +66,13 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 	}
 
 	// The target search must filter by the source identifiers, so it depends
-	// on the source search completing first. The two count calls are
-	// independent and run alongside both searches.
+	// on the source search completing first. The source count call runs
+	// independently alongside both searches. We don't count the target side:
+	// it's just a reference oracle for the diff, so its overall size is
+	// irrelevant to migration.
 	sourceDone := make(chan struct{})
 
-	wg.Add(4)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		defer close(sourceDone)
@@ -96,10 +96,6 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 		defer wg.Done()
 		sourceTotal, sourceCountErr = s.client.CountOldEntitiesByBlueprint(sourceBP, oldInstallID)
 	}()
-	go func() {
-		defer wg.Done()
-		targetTotal, targetCountErr = s.client.CountNewEntitiesByBlueprint(targetBP, newInstallID)
-	}()
 	wg.Wait()
 
 	if sourceErr != nil {
@@ -110,9 +106,6 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 	}
 	if sourceCountErr != nil {
 		return nil, fmt.Errorf("failed to count source entities: %w", sourceCountErr)
-	}
-	if targetCountErr != nil {
-		return nil, fmt.Errorf("failed to count target entities: %w", targetCountErr)
 	}
 
 	setDiffSuffix()
@@ -128,10 +121,8 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 		SourceBlueprint:   sourceBP,
 		TargetBlueprint:   targetBP,
 		SourceTotal:       sourceTotal,
-		TargetTotal:       targetTotal,
 		SourceIdentifiers: sourceIdentifiers,
 		SourceCompared:    len(sourceEntities),
-		TargetCompared:    len(targetEntities),
 		Changed:           changed,
 		NotMigrated:       notMigrated,
 		Summary: models.DiffSummary{
@@ -179,16 +170,18 @@ func DiffEntities(source, target []port.Entity) (identical []string, changed []m
 	return identical, changed, notMigrated
 }
 
-// PrintSummary writes the diff summary with entity identifiers to w
+// PrintSummary writes the diff summary with entity identifiers to w. The
+// only "capped" warning that fires is on the source side, and only when the
+// 5000-result cap actually truncated the source set — the target blueprint
+// is just a reference oracle for the diff, so its overall size is not
+// reported.
 func (s *Service) PrintSummary(w io.Writer, result *models.DiffResult) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "📊 %s (old) → %s (new)\n", result.SourceBlueprint, result.TargetBlueprint)
 	fmt.Fprintln(w, "   "+repeatString("─", 40))
-	if result.SourceCompared < result.SourceTotal {
-		fmt.Fprintf(w, "   ⚠️  source: compared %d / %d (capped)\n", result.SourceCompared, result.SourceTotal)
-	}
-	if result.TargetCompared < result.TargetTotal {
-		fmt.Fprintf(w, "   ⚠️  target: compared %d / %d (capped)\n", result.TargetCompared, result.TargetTotal)
+	if result.SourceTotal > port.MaxSearchResults {
+		fmt.Fprintf(w, "   ⚠️  source: compared %d / %d (capped at %d)\n",
+			result.SourceCompared, result.SourceTotal, port.MaxSearchResults)
 	}
 	fmt.Fprintf(w, "   ✅ %d identical\n", result.Summary.Identical)
 	if result.Summary.NotMigrated > 0 {

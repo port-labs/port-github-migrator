@@ -22,13 +22,16 @@ type MigrationStats struct {
 // DiffResult holds the comparison results. Changed and NotMigrated are kept
 // as disjoint slices so callers (renderers, the auto-mode result file, etc.)
 // don't have to demux a tagged type at every read site.
+//
+// Only source-side totals are tracked: the target blueprint is just a
+// reference oracle for the diff (it tells us the desired state for the
+// source identifiers we're comparing) and its overall size is irrelevant
+// to migration decisions.
 type DiffResult struct {
 	SourceBlueprint   string         `json:"sourceBlueprint"`
 	TargetBlueprint   string         `json:"targetBlueprint"`
 	SourceTotal       int            `json:"sourceTotal"` // true total available in old install
-	TargetTotal       int            `json:"targetTotal"` // true total available in new install
 	SourceCompared    int            `json:"sourceCompared"`
-	TargetCompared    int            `json:"targetCompared"`
 	SourceIdentifiers []string       `json:"sourceIdentifiers,omitempty"` // identifiers actually compared on the source side
 	Summary           DiffSummary    `json:"summary"`
 	Changed           []EntityChange `json:"changed"`     // entities present in both with property differences
