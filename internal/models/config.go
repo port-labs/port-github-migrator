@@ -19,7 +19,9 @@ type MigrationStats struct {
 	Errors            []string
 }
 
-// DiffResult holds the comparison results
+// DiffResult holds the comparison results. Changed and NotMigrated are kept
+// as disjoint slices so callers (renderers, the auto-mode result file, etc.)
+// don't have to demux a tagged type at every read site.
 type DiffResult struct {
 	SourceBlueprint   string         `json:"sourceBlueprint"`
 	TargetBlueprint   string         `json:"targetBlueprint"`
@@ -29,7 +31,8 @@ type DiffResult struct {
 	TargetCompared    int            `json:"targetCompared"`
 	SourceIdentifiers []string       `json:"sourceIdentifiers,omitempty"` // identifiers actually compared on the source side
 	Summary           DiffSummary    `json:"summary"`
-	Changes           []EntityChange `json:"changes"`
+	Changed           []EntityChange `json:"changed"`     // entities present in both with property differences
+	NotMigrated       []string       `json:"notMigrated"` // identifiers present only in the source
 }
 
 // DiffSummary holds summary statistics
@@ -39,12 +42,10 @@ type DiffSummary struct {
 	Changed     int `json:"changed"`
 }
 
-// EntityChange represents a single entity difference
+// EntityChange represents an entity that exists on both sides with differing
+// properties. Use DiffResult.NotMigrated for entities missing from the target.
 type EntityChange struct {
 	Identifier    string                  `json:"identifier"`
-	Type          string                  `json:"type"` // "identical", "changed", "notMigrated"
-	OldEntity     map[string]interface{}  `json:"oldEntity,omitempty"`
-	NewEntity     map[string]interface{}  `json:"newEntity,omitempty"`
 	PropertyDiffs map[string]PropertyDiff `json:"propertyDiffs,omitempty"`
 }
 

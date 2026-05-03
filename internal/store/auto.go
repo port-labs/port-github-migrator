@@ -16,15 +16,17 @@ import (
 const autoDir = "auto"
 
 // AutoResult is the on-disk shape of a single auto-mode run's outcome for one
-// blueprint: the changed entities (with their property diffs) and the
-// identifiers of entities present in the old install but missing from the new
-// one.
+// (sourceBlueprint -> targetBlueprint) pair: the changed entities (with their
+// property diffs) and the identifiers of entities present in the source
+// blueprint under the old install but missing from the target blueprint
+// under the new install.
 type AutoResult struct {
-	Blueprint   string                `json:"blueprint"`
-	GeneratedAt time.Time             `json:"generatedAt"`
-	Summary     models.DiffSummary    `json:"summary"`
-	Changed     []models.EntityChange `json:"changed"`
-	NotMigrated []string              `json:"notMigrated"`
+	SourceBlueprint string                `json:"sourceBlueprint"`
+	TargetBlueprint string                `json:"targetBlueprint"`
+	GeneratedAt     time.Time             `json:"generatedAt"`
+	Summary         models.DiffSummary    `json:"summary"`
+	Changed         []models.EntityChange `json:"changed"`
+	NotMigrated     []string              `json:"notMigrated"`
 }
 
 // SaveAutoResult writes the result file for an auto-mode run to

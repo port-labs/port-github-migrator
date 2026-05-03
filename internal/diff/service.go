@@ -124,16 +124,7 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 		sourceIdentifiers = append(sourceIdentifiers, e.Identifier)
 	}
 
-	combined := make([]models.EntityChange, 0, len(changed)+len(notMigrated))
-	for _, ch := range changed {
-		ch.Type = "changed"
-		combined = append(combined, ch)
-	}
-	for _, id := range notMigrated {
-		combined = append(combined, models.EntityChange{Identifier: id, Type: "notMigrated"})
-	}
-
-	result := &models.DiffResult{
+	return &models.DiffResult{
 		SourceBlueprint:   sourceBP,
 		TargetBlueprint:   targetBP,
 		SourceTotal:       sourceTotal,
@@ -141,15 +132,14 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 		SourceIdentifiers: sourceIdentifiers,
 		SourceCompared:    len(sourceEntities),
 		TargetCompared:    len(targetEntities),
-		Changes:           combined,
+		Changed:           changed,
+		NotMigrated:       notMigrated,
 		Summary: models.DiffSummary{
 			Identical:   len(identical),
 			Changed:     len(changed),
 			NotMigrated: len(notMigrated),
 		},
-	}
-
-	return result, nil
+	}, nil
 }
 
 // DiffEntities compares one batch of source entities to the target entities
@@ -203,52 +193,70 @@ func (s *Service) PrintSummary(w io.Writer, result *models.DiffResult) {
 	fmt.Fprintf(w, "   ✅ %d identical\n", result.Summary.Identical)
 	if result.Summary.NotMigrated > 0 {
 		fmt.Fprintf(w, "   ⚠️  %d not migrated (only in old)\n", result.Summary.NotMigrated)
-		for _, change := range result.Changes {
-			if change.Type == "notMigrated" {
-				fmt.Fprintf(w, "       • %s\n", change.Identifier)
-			}
-		}
 	}
 	fmt.Fprintf(w, "   📝 %d changed\n", result.Summary.Changed)
 	fmt.Fprintln(w)
 }
 
-// PrintDetailedDiffs writes detailed property diffs for changed entities to w
-func (s *Service) PrintDetailedDiffs(w io.Writer, changes []models.EntityChange, limit int) {
-	changedCount := 0
-	for _, change := range changes {
-		if change.Type == "changed" {
-			changedCount++
-		}
-	}
+// PrintDetailedDiffs writes detailed property diffs for changed entities and
+// the identifiers of not-migrated entities to w. limit caps each section
+// independently; pass <= 0 for unlimited.
+func (s *Service) PrintDetailedDiffs(w io.Writer, result *models.DiffResult, limit int) {
+	printChangedSection(w, result.Changed, limit)
+	printNotMigratedSection(w, result.NotMigrated, limit)
+}
 
-	if changedCount == 0 {
+func printChangedSection(w io.Writer, changed []models.EntityChange, limit int) {
+	if len(changed) == 0 {
 		return
 	}
 
-	fmt.Fprintf(w, "📋 Changed Entities (showing first %d):\n\n", limit)
+	header := "📋 Changed Entities"
+	if limit > 0 && len(changed) > limit {
+		fmt.Fprintf(w, "%s (showing first %d):\n\n", header, limit)
+	} else {
+		fmt.Fprintf(w, "%s:\n\n", header)
+	}
 
 	shown := 0
-	for _, change := range changes {
-		if change.Type != "changed" {
-			continue
-		}
-
-		if shown >= limit {
-			fmt.Fprintf(w, "⏭️  Showing %d of %d changed entities. Use --limit to show more.\n", limit, changedCount)
+	for _, change := range changed {
+		if limit > 0 && shown >= limit {
+			fmt.Fprintf(w, "⏭️  Showing %d of %d changed entities. Use --limit to show more, or --output to dump the full list to a file.\n", limit, len(changed))
 			break
 		}
-
 		if shown > 0 {
 			fmt.Fprintln(w)
 		}
-
 		fmt.Fprintf(w, "  • %s\n", change.Identifier)
-		flatDiffs := flattenDiffs(change.PropertyDiffs)
-		for _, path := range flatDiffs {
+		for _, path := range flattenDiffs(change.PropertyDiffs) {
 			fmt.Fprintf(w, "    - %s: %v\n", path.Path, path.OldValue)
 			fmt.Fprintf(w, "    + %s: %v\n", path.Path, path.NewValue)
 		}
+		shown++
+	}
+
+	fmt.Fprintln(w)
+}
+
+func printNotMigratedSection(w io.Writer, notMigrated []string, limit int) {
+	if len(notMigrated) == 0 {
+		return
+	}
+
+	header := "⚠️  Not Migrated (only in old)"
+	if limit > 0 && len(notMigrated) > limit {
+		fmt.Fprintf(w, "%s (showing first %d):\n\n", header, limit)
+	} else {
+		fmt.Fprintf(w, "%s:\n\n", header)
+	}
+
+	shown := 0
+	for _, id := range notMigrated {
+		if limit > 0 && shown >= limit {
+			fmt.Fprintf(w, "⏭️  Showing %d of %d not-migrated entities. Use --limit to show more, or --output to dump the full list to a file.\n", limit, len(notMigrated))
+			break
+		}
+		fmt.Fprintf(w, "  • %s\n", id)
 		shown++
 	}
 

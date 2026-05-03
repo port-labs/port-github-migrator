@@ -24,15 +24,17 @@ const autoBatchSize = port.MaxSearchResults
 // call. Mirrors migrateBlueprint's chunking.
 const autoPatchChunkSize = 20
 
-// MigrateAuto runs the unattended per-blueprint auto migration: it walks the
-// old installation in autoBatchSize batches, diffs each batch against the
-// new installation, patches the identical entities, and persists the
-// remaining changed/missing ones into a single result file under the cache
-// directory. The path of that file is returned on success.
+// MigrateAuto runs the unattended auto migration for one source -> target
+// blueprint pair: it walks the source blueprint under the old installation in
+// autoBatchSize batches, diffs each batch against the target blueprint under
+// the new installation, patches identical source-blueprint entities to the
+// new datasource, and persists the remaining changed/missing identifiers
+// into a single result file under the cache directory. The path of that
+// file is returned on success.
 //
 // Auto mode requires a working store (we always write a result file). The
 // spinner is rendered to spinnerOut; pass io.Discard to disable it.
-func (m *Migrator) MigrateAuto(blueprintID, newDatasourceID string, dryRun bool, spinnerOut io.Writer) (string, error) {
+func (m *Migrator) MigrateAuto(sourceBlueprintID, targetBlueprintID, newDatasourceID string, dryRun bool, spinnerOut io.Writer) (string, error) {
 	if m.store == nil {
 		return "", errors.New("auto mode requires a writable cache directory; could not open one")
 	}
@@ -64,20 +66,21 @@ func (m *Migrator) MigrateAuto(blueprintID, newDatasourceID string, dryRun bool,
 		stateMu.Unlock()
 	}
 
-	setSuffix(fmt.Sprintf("counting %s entities...", blueprintID))
+	setSuffix(fmt.Sprintf("counting %s entities (old install)...", sourceBlueprintID))
 	sp.Start()
 	defer sp.Stop()
 
-	totalAvailable, err := m.client.CountOldEntitiesByBlueprint(blueprintID, m.config.OldInstallationID)
+	totalAvailable, err := m.client.CountOldEntitiesByBlueprint(sourceBlueprintID, m.config.OldInstallationID)
 	if err != nil {
 		return "", fmt.Errorf("failed to count source entities: %w", err)
 	}
 
 	result := store.AutoResult{
-		Blueprint:   blueprintID,
-		GeneratedAt: time.Now().UTC(),
-		Changed:     []models.EntityChange{},
-		NotMigrated: []string{},
+		SourceBlueprint: sourceBlueprintID,
+		TargetBlueprint: targetBlueprintID,
+		GeneratedAt:     time.Now().UTC(),
+		Changed:         []models.EntityChange{},
+		NotMigrated:     []string{},
 	}
 	var totalIdentical, totalProcessed int
 
@@ -88,7 +91,7 @@ func (m *Migrator) MigrateAuto(blueprintID, newDatasourceID string, dryRun bool,
 
 	processBatch := func(batch []port.Entity, batchIndex int) error {
 		setBatch(batchIndex + 1)
-		setSuffix(fmt.Sprintf("fetching target entities (%d ids)...", len(batch)))
+		setSuffix(fmt.Sprintf("fetching target entities from %s (%d ids)...", targetBlueprintID, len(batch)))
 
 		ids := make([]string, len(batch))
 		for i, e := range batch {
@@ -96,7 +99,7 @@ func (m *Migrator) MigrateAuto(blueprintID, newDatasourceID string, dryRun bool,
 		}
 
 		targetEntities, err := m.client.SearchNewEntitiesByBlueprint(
-			blueprintID,
+			targetBlueprintID,
 			m.config.NewInstallationID,
 			ids,
 			&port.SearchOptions{
@@ -134,12 +137,12 @@ func (m *Migrator) MigrateAuto(blueprintID, newDatasourceID string, dryRun bool,
 
 		patched := 0
 		for i := 0; i < len(identical); i += autoPatchChunkSize {
-			end := min(i + autoPatchChunkSize, len(identical))
+			end := min(i+autoPatchChunkSize, len(identical))
 			chunk := identical[i:end]
 
 			setSuffix(fmt.Sprintf("patching identicals %d/%d (processed %d/%d)", patched+len(chunk), len(identical), totalProcessed, totalAvailable))
 
-			if err := m.client.PatchEntitiesDatasourceBulk(blueprintID, chunk, newDatasourceID); err != nil {
+			if err := m.client.PatchEntitiesDatasourceBulk(sourceBlueprintID, chunk, newDatasourceID); err != nil {
 				return fmt.Errorf("failed to patch batch: %w", err)
 			}
 			patched += len(chunk)
@@ -150,9 +153,9 @@ func (m *Migrator) MigrateAuto(blueprintID, newDatasourceID string, dryRun bool,
 		return nil
 	}
 
-	setSuffix(fmt.Sprintf("fetching source entities (0/%d)...", totalAvailable))
+	setSuffix(fmt.Sprintf("fetching source entities from %s (0/%d)...", sourceBlueprintID, totalAvailable))
 	if err := m.client.SearchOldEntitiesPaged(
-		blueprintID,
+		sourceBlueprintID,
 		m.config.OldInstallationID,
 		autoBatchSize,
 		nil,
@@ -173,9 +176,9 @@ func (m *Migrator) MigrateAuto(blueprintID, newDatasourceID string, dryRun bool,
 
 	fmt.Println()
 	if dryRun {
-		fmt.Printf("🔄 DRY RUN: would have patched %d identical entities for %s\n", totalIdentical, blueprintID)
+		fmt.Printf("🔄 DRY RUN: would have patched %d identical entities (%s -> %s)\n", totalIdentical, sourceBlueprintID, targetBlueprintID)
 	} else {
-		fmt.Printf("✅ Patched %d identical entities for %s\n", totalIdentical, blueprintID)
+		fmt.Printf("✅ Patched %d identical entities (%s -> %s)\n", totalIdentical, sourceBlueprintID, targetBlueprintID)
 	}
 	fmt.Printf("📊 Summary: %d identical, %d changed, %d not migrated (%d processed / %d available)\n",
 		result.Summary.Identical, result.Summary.Changed, result.Summary.NotMigrated, totalProcessed, totalAvailable)

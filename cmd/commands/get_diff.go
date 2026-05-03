@@ -81,8 +81,8 @@ func NewGetDiffCommand() *cobra.Command {
 
 			diffService.PrintSummary(out, result)
 
-			if showDiffs && len(result.Changes) > 0 {
-				diffService.PrintDetailedDiffs(out, result.Changes, limit)
+			if showDiffs && (len(result.Changed) > 0 || len(result.NotMigrated) > 0) {
+				diffService.PrintDetailedDiffs(out, result, limit)
 			}
 
 			if outputPath != "" {

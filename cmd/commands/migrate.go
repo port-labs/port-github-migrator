@@ -13,9 +13,17 @@ import (
 
 func NewMigrateCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "migrate [blueprint]",
+		Use:          "migrate [sourceBlueprint] [targetBlueprint]",
 		Short:        "Migrate Ownership of entities from a specific blueprint or all blueprints",
-		Long:         `Migrate Ownership of entities from the old GitHub App integration to the new GitHub Ocean integration.`,
+		Long: `Migrate Ownership of entities from the old GitHub App integration to the new GitHub Ocean integration.
+
+Modes:
+  migrate <blueprint>                              Migrate a single blueprint (uses get-diff cache if available).
+  migrate --all                                    Migrate every blueprint reachable from the old installation.
+  migrate <sourceBlueprint> <targetBlueprint> --auto
+                                                   Auto mode: paginate the source blueprint, diff each batch
+                                                   against the target blueprint under the new installation,
+                                                   patch identicals in place, and dump the rest to a result file.`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			portURL, _ := cmd.Flags().GetString("port-url")
@@ -28,21 +36,28 @@ func NewMigrateCommand() *cobra.Command {
 			auto, _ := cmd.Flags().GetBool("auto")
 
 			if auto && all {
-				return fmt.Errorf("❌ --auto cannot be combined with --all; auto mode runs against a single blueprint")
+				return fmt.Errorf("❌ --auto cannot be combined with --all; auto mode runs against a single source/target blueprint pair")
 			}
-			if auto && len(args) == 0 {
-				return fmt.Errorf("❌ --auto requires a blueprint argument. Usage: migrate <blueprint> --auto")
+			if auto && len(args) != 2 {
+				return fmt.Errorf("❌ --auto requires both sourceBlueprint and targetBlueprint arguments. Usage: migrate <sourceBlueprint> <targetBlueprint> --auto")
+			}
+			if !auto && len(args) > 1 {
+				return fmt.Errorf("❌ a second blueprint argument is only valid with --auto (source/target pair). Use a single blueprint or --all otherwise")
 			}
 			if len(args) == 0 && !all {
-				return fmt.Errorf("❌ either provide a blueprint name or use --all flag. Usage: migrate <blueprint> or migrate --all")
+				return fmt.Errorf("❌ either provide a blueprint name or use --all flag. Usage: migrate <blueprint> or migrate --all or migrate <sourceBlueprint> <targetBlueprint> --auto")
 			}
 			if len(args) > 0 && all {
 				return fmt.Errorf("❌ cannot use both blueprint argument and --all flag")
 			}
 
 			blueprint := ""
+			targetBlueprint := ""
 			if len(args) > 0 {
 				blueprint = args[0]
+			}
+			if len(args) > 1 {
+				targetBlueprint = args[1]
 			}
 
 			// Validate required parameters
@@ -101,14 +116,15 @@ func NewMigrateCommand() *cobra.Command {
 
 			mig := migrator.NewMigrator(client, config, st)
 
-		// Auto mode: paginate the blueprint, diff each batch, patch identicals
-		// in place, and dump the leftover changed/missing entities to a single
+		// Auto mode: paginate the source blueprint, diff each batch against
+		// the target blueprint under the new install, patch identicals in
+		// place, and dump the leftover changed/missing entities to a single
 		// result file under the cache directory.
 		if auto {
 			if st == nil {
 				return fmt.Errorf("❌ --auto requires a writable cache directory; could not open one")
 			}
-			path, err := mig.MigrateAuto(blueprint, newDatasourceID, dryRun, cmd.ErrOrStderr())
+			path, err := mig.MigrateAuto(blueprint, targetBlueprint, newDatasourceID, dryRun, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -142,7 +158,7 @@ func NewMigrateCommand() *cobra.Command {
 
 	cmd.Flags().Bool("dry-run", false, "Show what would be migrated without making changes")
 	cmd.Flags().Bool("all", false, "Migrate all blueprints with entities")
-	cmd.Flags().Bool("auto", false, "Auto mode: paginate the blueprint in batches, migrate identical entities, and dump remaining diffs to a result file (single blueprint only)")
+	cmd.Flags().Bool("auto", false, "Auto mode: paginate the source blueprint in batches, diff each batch against the target blueprint under the new install, migrate identical entities, and dump remaining diffs to a result file. Requires <sourceBlueprint> <targetBlueprint> positional args.")
 
 	return cmd
 }

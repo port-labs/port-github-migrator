@@ -550,10 +550,10 @@ func (c *Client) SearchOldEntitiesPaged(
 	return nil
 }
 
-func oldGitHubAppEntityQuery(oldInstallationID string) map[string]interface{} {
-	return map[string]interface{}{
+func oldGitHubAppEntityQuery(oldInstallationID string) map[string]any {
+	return map[string]any{
 		"combinator": "and",
-		"rules": []map[string]interface{}{
+		"rules": []map[string]any{
 			{
 				"property": "$datasource",
 				"operator": "contains",
