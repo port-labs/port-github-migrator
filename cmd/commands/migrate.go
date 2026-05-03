@@ -25,8 +25,14 @@ func NewMigrateCommand() *cobra.Command {
 			newInstallID, _ := cmd.Flags().GetString("new-installation-id")
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			all, _ := cmd.Flags().GetBool("all")
+			auto, _ := cmd.Flags().GetBool("auto")
 
-			// Validate blueprint or --all flag
+			if auto && all {
+				return fmt.Errorf("❌ --auto cannot be combined with --all; auto mode runs against a single blueprint")
+			}
+			if auto && len(args) == 0 {
+				return fmt.Errorf("❌ --auto requires a blueprint argument. Usage: migrate <blueprint> --auto")
+			}
 			if len(args) == 0 && !all {
 				return fmt.Errorf("❌ either provide a blueprint name or use --all flag. Usage: migrate <blueprint> or migrate --all")
 			}
@@ -95,6 +101,21 @@ func NewMigrateCommand() *cobra.Command {
 
 			mig := migrator.NewMigrator(client, config, st)
 
+		// Auto mode: paginate the blueprint, diff each batch, patch identicals
+		// in place, and dump the leftover changed/missing entities to a single
+		// result file under the cache directory.
+		if auto {
+			if st == nil {
+				return fmt.Errorf("❌ --auto requires a writable cache directory; could not open one")
+			}
+			path, err := mig.MigrateAuto(blueprint, newDatasourceID, dryRun, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "📝 Result file: %s\n", path)
+			return nil
+		}
+
 		// If migrating "all", show blueprints with entity counts first
 		if all {
 			fmt.Fprintln(cmd.OutOrStdout(), "📋 Blueprints to migrate:")
@@ -121,6 +142,7 @@ func NewMigrateCommand() *cobra.Command {
 
 	cmd.Flags().Bool("dry-run", false, "Show what would be migrated without making changes")
 	cmd.Flags().Bool("all", false, "Migrate all blueprints with entities")
+	cmd.Flags().Bool("auto", false, "Auto mode: paginate the blueprint in batches, migrate identical entities, and dump remaining diffs to a result file (single blueprint only)")
 
 	return cmd
 }

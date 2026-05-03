@@ -9,13 +9,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
 	appDir         = "port-github-migrator"
 	blueprintsDir  = "blueprints"
 	manifestSuffix = ".json"
+
+	// cacheTTL is how long a saved identifier list is considered fresh. After
+	// this window, LoadIdentifiers treats the file as missing so callers do a
+	// fresh fetch against Port instead of acting on a stale snapshot.
+	cacheTTL = 10 * time.Minute
 )
+
+// cacheMetadata is the on-disk shape of a cache file: a creation
+// timestamp for TTL enforcement plus the identifier list itself.
+type cacheMetadata struct {
+	CreatedAt   time.Time `json:"createdAt"`
+	Identifiers []string  `json:"identifiers"`
+}
 
 // Store is a small wrapper around the on-disk cache directory.
 type Store struct {
@@ -44,7 +57,8 @@ func (s *Store) ManifestPath(oldInstallID, bp string) string {
 }
 
 // SaveIdentifiers writes (or overwrites) the identifier list for
-// (oldInstallID, bp) and returns the file path it was written to.
+// (oldInstallID, bp) and returns the file path it was written to. The file
+// embeds the creation timestamp so that stale reads can be detected.
 func (s *Store) SaveIdentifiers(oldInstallID, bp string, identifiers []string) (string, error) {
 	if oldInstallID == "" || bp == "" {
 		return "", errors.New("oldInstallID and blueprint are required")
@@ -55,7 +69,10 @@ func (s *Store) SaveIdentifiers(oldInstallID, bp string, identifiers []string) (
 		return "", fmt.Errorf("failed to create cache dir: %w", err)
 	}
 
-	data, err := json.MarshalIndent(identifiers, "", "  ")
+	data, err := json.MarshalIndent(cacheMetadata{
+		CreatedAt:   time.Now().UTC(),
+		Identifiers: identifiers,
+	}, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -67,8 +84,8 @@ func (s *Store) SaveIdentifiers(oldInstallID, bp string, identifiers []string) (
 }
 
 // LoadIdentifiers returns the saved identifier list for (oldInstallID, bp).
-// If no list has been saved, it returns (nil, nil) so callers can simply
-// branch on the nil result.
+// Returns (nil, nil) when no file exists OR when the cached entry is older
+// than cacheTTL — callers should treat both as a cache miss and fetch fresh.
 func (s *Store) LoadIdentifiers(oldInstallID, bp string) ([]string, error) {
 	data, err := os.ReadFile(s.ManifestPath(oldInstallID, bp))
 	if err != nil {
@@ -77,11 +94,14 @@ func (s *Store) LoadIdentifiers(oldInstallID, bp string) ([]string, error) {
 		}
 		return nil, err
 	}
-	var identifiers []string
-	if err := json.Unmarshal(data, &identifiers); err != nil {
+	var c cacheMetadata
+	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("failed to parse identifier list %s: %w", bp, err)
 	}
-	return identifiers, nil
+	if time.Since(c.CreatedAt) > cacheTTL {
+		return nil, nil
+	}
+	return c.Identifiers, nil
 }
 
 // DeleteIdentifiers removes a blueprint's identifier file. It's a no-op if

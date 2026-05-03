@@ -1,7 +1,6 @@
 package diff
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -118,21 +117,22 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 
 	setDiffSuffix()
 
-	// Index entities
-	sourceMap := make(map[string]port.Entity)
-	targetMap := make(map[string]port.Entity)
-	sourceIdentifiers := make([]string, 0, len(sourceEntities))
+	identical, changed, notMigrated := DiffEntities(sourceEntities, targetEntities)
 
+	sourceIdentifiers := make([]string, 0, len(sourceEntities))
 	for _, e := range sourceEntities {
-		sourceMap[e.Identifier] = e
 		sourceIdentifiers = append(sourceIdentifiers, e.Identifier)
 	}
 
-	for _, e := range targetEntities {
-		targetMap[e.Identifier] = e
+	combined := make([]models.EntityChange, 0, len(changed)+len(notMigrated))
+	for _, ch := range changed {
+		ch.Type = "changed"
+		combined = append(combined, ch)
+	}
+	for _, id := range notMigrated {
+		combined = append(combined, models.EntityChange{Identifier: id, Type: "notMigrated"})
 	}
 
-	// Compare entities
 	result := &models.DiffResult{
 		SourceBlueprint:   sourceBP,
 		TargetBlueprint:   targetBP,
@@ -141,37 +141,52 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 		SourceIdentifiers: sourceIdentifiers,
 		SourceCompared:    len(sourceEntities),
 		TargetCompared:    len(targetEntities),
-		Changes:           []models.EntityChange{},
-	}
-
-	// Check common entities
-	for id, sourceEntity := range sourceMap {
-		if targetEntity, exists := targetMap[id]; exists {
-			// Entity exists in both
-			if entitiesEqual(sourceEntity, targetEntity) {
-				result.Summary.Identical++
-			} else {
-				result.Summary.Changed++
-				change := models.EntityChange{
-					Identifier: id,
-					Type:       "changed",
-					PropertyDiffs: getPropertyDiffs(sourceEntity, targetEntity),
-				}
-				result.Changes = append(result.Changes, change)
-			}
-		} else {
-			// Entity only in source (not migrated)
-			result.Summary.NotMigrated++
-			change := models.EntityChange{
-				Identifier: id,
-				Type:       "notMigrated",
-				OldEntity:  entityToMap(sourceEntity),
-			}
-			result.Changes = append(result.Changes, change)
-		}
+		Changes:           combined,
+		Summary: models.DiffSummary{
+			Identical:   len(identical),
+			Changed:     len(changed),
+			NotMigrated: len(notMigrated),
+		},
 	}
 
 	return result, nil
+}
+
+// DiffEntities compares one batch of source entities to the target entities
+// fetched for them. It returns three disjoint slices so callers can act on
+// them directly without re-discriminating by type:
+//
+//   - identical:  identifiers that match on both sides
+//   - changed:    EntityChange values carrying the per-property diffs
+//   - notMigrated: identifiers present on the source but missing from the target
+func DiffEntities(source, target []port.Entity) (identical []string, changed []models.EntityChange, notMigrated []string) {
+	targetMap := make(map[string]port.Entity, len(target))
+	for _, e := range target {
+		targetMap[e.Identifier] = e
+	}
+
+	identical = make([]string, 0, len(source))
+	changed = make([]models.EntityChange, 0)
+	notMigrated = make([]string, 0)
+
+	for _, sourceEntity := range source {
+		id := sourceEntity.Identifier
+		targetEntity, exists := targetMap[id]
+		if !exists {
+			notMigrated = append(notMigrated, id)
+			continue
+		}
+		if entitiesEqual(sourceEntity, targetEntity) {
+			identical = append(identical, id)
+			continue
+		}
+		changed = append(changed, models.EntityChange{
+			Identifier:    id,
+			PropertyDiffs: getPropertyDiffs(sourceEntity, targetEntity),
+		})
+	}
+
+	return identical, changed, notMigrated
 }
 
 // PrintSummary writes the diff summary with entity identifiers to w
@@ -298,13 +313,6 @@ func getPropertyDiffs(e1, e2 port.Entity) map[string]models.PropertyDiff {
 	}
 
 	return diffs
-}
-
-func entityToMap(e port.Entity) map[string]interface{} {
-	data, _ := json.Marshal(e)
-	var m map[string]interface{}
-	json.Unmarshal(data, &m)
-	return m
 }
 
 func repeatString(s string, count int) string {

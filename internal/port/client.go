@@ -369,17 +369,61 @@ func (c *Client) GetBlueprint(blueprintID string) (*Blueprint, error) {
 	return &bpResp.Blueprint, nil
 }
 
-func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]any, options *SearchOptions) ([]Entity, error) {
-	allEntities := []Entity{}
-	opts := DefaultSearchOptions()
-	if options != nil {
-		opts = *options
+// httpPageSize is the maximum number of entities the search endpoint returns
+// per HTTP request. Higher-level batching (auto mode) is built on top of this.
+const httpPageSize = 1000
+
+// searchPageRequest captures everything the search endpoint needs to produce
+// one HTTP page so callers can paginate at different granularities.
+type searchPageRequest struct {
+	blueprintID string
+	query       map[string]any
+	include     []string
+	from        string
+}
+
+// fetchSearchPage performs a single search HTTP call and returns the entities
+// plus the cursor for the next page (empty when exhausted).
+func (c *Client) fetchSearchPage(req searchPageRequest) ([]Entity, string, error) {
+	reqBody := map[string]any{
+		"limit":   httpPageSize,
+		"include": req.include,
+	}
+	if req.query != nil {
+		reqBody["query"] = req.query
+	}
+	if req.from != "" {
+		reqBody["from"] = req.from
 	}
 
-	limitPerPage := 1000
-	var next string
-	searchURL := fmt.Sprintf("%s/v1/blueprints/%s/entities/search", c.baseURL, blueprintID)
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, "", err
+	}
 
+	searchURL := fmt.Sprintf("%s/v1/blueprints/%s/entities/search", c.baseURL, req.blueprintID)
+	resp, err := c.doAuthorizedRequest("POST", searchURL, bodyBytes, "application/json")
+	if err != nil {
+		return nil, "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, "", fmt.Errorf("search failed: %s", string(body))
+	}
+
+	var searchResp SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+		return nil, "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return searchResp.Entities, searchResp.Next, nil
+}
+
+// resolveIncludes builds the include list (identifier + title + properties +
+// relations) that the search endpoint needs based on the blueprint schema.
+func (c *Client) resolveIncludes(blueprintID string, opts SearchOptions) ([]string, error) {
 	bp, err := c.GetBlueprint(blueprintID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch blueprint %s: %w", blueprintID, err)
@@ -389,66 +433,121 @@ func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]
 	if opts.IncludeTitle {
 		include = append(include, "$title")
 	}
-
 	if opts.IncludeProperties {
-	for k := range bp.Schema.Properties {
+		for k := range bp.Schema.Properties {
 			include = append(include, k)
 		}
 	}
-
 	if opts.IncludeRelations {
 		for k := range bp.Relations {
 			include = append(include, k)
 		}
 	}
+	return include, nil
+}
 
+func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]any, options *SearchOptions) ([]Entity, error) {
+	opts := DefaultSearchOptions()
+	if options != nil {
+		opts = *options
+	}
+
+	include, err := c.resolveIncludes(blueprintID, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	allEntities := []Entity{}
+	var next string
 	for {
-		reqBody := map[string]any{
-			"limit":   limitPerPage,
-			"include": include,
-		}
-
-		if query != nil {
-			reqBody["query"] = query
-		}
-
-		if next != "" {
-			reqBody["from"] = next
-		}
-
-		bodyBytes, err := json.Marshal(reqBody)
+		page, nextCursor, err := c.fetchSearchPage(searchPageRequest{
+			blueprintID: blueprintID,
+			query:       query,
+			include:     include,
+			from:        next,
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		resp, err := c.doAuthorizedRequest("POST", searchURL, bodyBytes, "application/json")
-		if err != nil {
-			return nil, fmt.Errorf("request failed: %w", err)
-		}
+		allEntities = append(allEntities, page...)
 
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("search failed: %s", string(body))
-		}
-
-		var searchResp SearchResponse
-		if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to decode response: %w", err)
-		}
-		resp.Body.Close()
-
-		allEntities = append(allEntities, searchResp.Entities...)
-
-		if searchResp.Next == "" || (opts.EnforceTotalLimit && len(allEntities) >= MaxSearchResults) {
+		if nextCursor == "" || (opts.EnforceTotalLimit && len(allEntities) >= MaxSearchResults) {
 			break
 		}
-
-		next = searchResp.Next
+		next = nextCursor
 	}
 
 	return allEntities, nil
+}
+
+// SearchOldEntitiesPaged streams old GitHub App entities to `handle` in
+// batches of up to `batchSize` (defaults to MaxSearchResults when <= 0).
+// Unlike SearchOldEntitiesByBlueprint, this method has no overall cap: it
+// walks the cursor until exhausted so auto mode can process every entity.
+// `handle` is invoked synchronously; returning an error aborts iteration.
+func (c *Client) SearchOldEntitiesPaged(
+	blueprintID, oldInstallationID string,
+	batchSize int,
+	options *SearchOptions,
+	handle func(batch []Entity, batchIndex int) error,
+) error {
+	if batchSize <= 0 {
+		batchSize = MaxSearchResults
+	}
+
+	opts := DefaultSearchOptions()
+	if options != nil {
+		opts = *options
+	}
+	opts.EnforceTotalLimit = false
+
+	include, err := c.resolveIncludes(blueprintID, opts)
+	if err != nil {
+		return err
+	}
+
+	query := oldGitHubAppEntityQuery(oldInstallationID)
+
+	var (
+		buffer     []Entity
+		next       string
+		batchIndex int
+		exhausted  bool
+	)
+
+	for !exhausted {
+		page, nextCursor, err := c.fetchSearchPage(searchPageRequest{
+			blueprintID: blueprintID,
+			query:       query,
+			include:     include,
+			from:        next,
+		})
+		if err != nil {
+			return err
+		}
+
+		buffer = append(buffer, page...)
+		next = nextCursor
+		exhausted = nextCursor == ""
+
+		for len(buffer) >= batchSize {
+			batch := buffer[:batchSize]
+			if err := handle(batch, batchIndex); err != nil {
+				return err
+			}
+			batchIndex++
+			buffer = buffer[batchSize:]
+		}
+	}
+
+	if len(buffer) > 0 {
+		if err := handle(buffer, batchIndex); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func oldGitHubAppEntityQuery(oldInstallationID string) map[string]interface{} {
