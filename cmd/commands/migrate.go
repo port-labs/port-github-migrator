@@ -7,6 +7,7 @@ import (
 	"github.com/port-labs/port-github-migrator/internal/migrator"
 	"github.com/port-labs/port-github-migrator/internal/models"
 	"github.com/port-labs/port-github-migrator/internal/port"
+	"github.com/port-labs/port-github-migrator/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -14,7 +15,11 @@ func NewMigrateCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "migrate [blueprint]",
 		Short:        "Migrate Ownership of entities from a specific blueprint or all blueprints",
-		Long:         `Migrate Ownership of entities from the old GitHub App integration to the new GitHub Ocean integration.`,
+		Long: `Migrate Ownership of entities from the old GitHub App integration to the new GitHub Ocean integration.
+
+When run for a single blueprint, migrate honors the manifest produced by
+'get-diff' if one exists for the same old installation: it patches exactly
+those identifiers and removes the manifest on success.`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			portURL, _ := cmd.Flags().GetString("port-url")
@@ -56,8 +61,6 @@ func NewMigrateCommand() *cobra.Command {
 
 			client := port.NewClient(portURL, clientID, clientSecret)
 
-			// Fetch the new integration. We need its version for the datasource id
-			// and its config for the entityDeletionThreshold safety check.
 			intg, err := client.GetIntegration(newInstallID)
 			if err != nil {
 				return fmt.Errorf("failed to get integration: %w", err)
@@ -80,7 +83,14 @@ func NewMigrateCommand() *cobra.Command {
 				NewInstallationID: newInstallID,
 			}
 
-			mig := migrator.NewMigrator(client, config)
+			// Open the local manifest store; if it can't be opened we still
+			// migrate, just without the get-diff manifest contract.
+			st, storeErr := store.Open()
+			if storeErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "⚠️  Could not open local cache, manifests will be ignored: %v\n", storeErr)
+			}
+
+			mig := migrator.NewMigrator(client, config, st)
 
 			if all {
 				fmt.Fprintln(cmd.OutOrStdout(), "📋 Blueprints to migrate:")
@@ -89,7 +99,7 @@ func NewMigrateCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				blueprints.PrintCounts(cmd.OutOrStdout(), counts, false)
+				blueprints.PrintCounts(cmd.OutOrStdout(), counts, false, true)
 				fmt.Fprintln(cmd.OutOrStdout())
 			}
 
