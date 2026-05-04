@@ -99,7 +99,6 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 		total := blueprintCounts[bp]
 
 		if total == 0 {
-			fmt.Printf("\n🔄 Migrating %d entities from blueprint: %s\n", total, bp)
 			fmt.Println("⏭️  No entities to migrate")
 			continue
 		}
