@@ -5,9 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	maxRetries = 3
+
+	// MaxSearchResults caps the number of entities returned by a single
+	// search call. Source-side migration is bounded by this limit; counts
+	// returned via the entities/group endpoint are not.
+	MaxSearchResults = 5000
 )
 
 // Client handles all Port API interactions
@@ -26,11 +37,18 @@ type AuthResponse struct {
 	ExpiresIn   int    `json:"expiresIn"`
 }
 
-// IntegrationResponse represents integration details
+// Integration represents a Port integration / installation as returned by
+// GET /v1/integration/{installationId}. Config holds the integration's
+// mapping config which we inspect for guardrails such as
+// `entityDeletionThreshold` before migrating.
+type Integration struct {
+	Version string         `json:"version"`
+	Config  map[string]any `json:"config"`
+}
+
+// IntegrationResponse is the wire envelope returned by the integration endpoint.
 type IntegrationResponse struct {
-	Integration struct {
-		Version string `json:"version"`
-	} `json:"integration"`
+	Integration Integration `json:"integration"`
 }
 
 // DataSourceResponse represents datasources from Port
@@ -129,8 +147,45 @@ func (c *Client) getToken() (string, error) {
 	return c.fetchAccessToken()
 }
 
+// doAuthorizedRequest performs an authorized request and retries on transient
+// failures (network errors, 429, 5xx). 401 is handled inside attemptWithAuth
+// by refreshing the access token and retrying once.
 func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentType string) (*http.Response, error) {
-	attempt := func() (*http.Response, error) {
+	var lastErr error
+
+	for i := 0; i <= maxRetries; i++ {
+		resp, err := c.attemptWithAuth(method, url, body, contentType)
+		if err != nil {
+			lastErr = err
+			if i == maxRetries {
+				break
+			}
+			time.Sleep(backoff(i, 0))
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			wait := retryAfter(resp.Header.Get("x-ratelimit-reset"))
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("port returned status %d", resp.StatusCode)
+			if i == maxRetries {
+				break
+			}
+			time.Sleep(backoff(i, wait))
+			continue
+		}
+
+		return resp, nil
+	}
+
+	return nil, fmt.Errorf("request failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// attemptWithAuth performs a single request, transparently refreshing the
+// access token and retrying once on 401.
+func (c *Client) attemptWithAuth(method, url string, body []byte, contentType string) (*http.Response, error) {
+	do := func() (*http.Response, error) {
 		var r io.Reader
 		if len(body) > 0 {
 			r = bytes.NewReader(body)
@@ -147,10 +202,11 @@ func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentTyp
 			return nil, err
 		}
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+		req.Header.Set("User-Agent", "port-github-migrator")
 		return c.httpClient.Do(req)
 	}
 
-	resp, err := attempt()
+	resp, err := do()
 	if err != nil {
 		return nil, err
 	}
@@ -160,13 +216,43 @@ func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentTyp
 		if _, err := c.fetchAccessToken(); err != nil {
 			return nil, err
 		}
-		return attempt()
+		return do()
 	}
 	return resp, nil
 }
 
-// GetIntegrationVersion fetches the version of an integration
-func (c *Client) GetIntegrationVersion(installationID string) (string, error) {
+// backoff returns an exponential backoff with jitter, or `hint` if it's
+// positive (used to honor the server's Retry-After / x-ratelimit-reset hint).
+func backoff(attempt int, hint time.Duration) time.Duration {
+	if hint > 0 {
+		return hint
+	}
+	base := time.Duration(1<<attempt) * time.Second
+	jitter := time.Duration(rand.Int63n(int64(500 * time.Millisecond)))
+	return base + jitter
+}
+
+// retryAfter parses an x-ratelimit-reset / Retry-After header. It accepts
+// either a delta-seconds integer or an HTTP-date.
+func retryAfter(h string) time.Duration {
+	if h == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(strings.TrimSpace(h)); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// GetIntegration fetches the full integration (version + config) for the
+// given installation. The Config map is required by callers that need to
+// enforce mapping-level guardrails such as `entityDeletionThreshold`.
+func (c *Client) GetIntegration(installationID string) (*Integration, error) {
 	resp, err := c.doAuthorizedRequest(
 		"GET",
 		fmt.Sprintf("%s/v1/integration/%s", c.baseURL, installationID),
@@ -174,29 +260,25 @@ func (c *Client) GetIntegrationVersion(installationID string) (string, error) {
 		"",
 	)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("integration not found")
+		return nil, fmt.Errorf("integration not found")
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("request failed: %s", string(body))
+		return nil, fmt.Errorf("request failed: %s", string(body))
 	}
 
 	var intResp IntegrationResponse
 	if err := json.NewDecoder(resp.Body).Decode(&intResp); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	if intResp.Integration.Version == "" {
-		return "", fmt.Errorf("integration version not found")
-	}
-
-	return intResp.Integration.Version, nil
+	return &intResp.Integration, nil
 }
 
 // GetBlueprintsByDataSource fetches all blueprints for an installation
@@ -323,9 +405,10 @@ func (c *Client) SearchOldEntitiesByBlueprint(blueprintID, oldInstallationID str
 	return c.searchEntitiesByBlueprint(blueprintID, oldGitHubAppEntityQuery(oldInstallationID))
 }
 
-// SearchNewEntitiesByBlueprint searches for new GitHub Ocean entities
-func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID string) ([]Entity, error) {
-	query := map[string]interface{}{
+// newGitHubOceanEntityQuery returns the search filter used to locate entities
+// owned by the new GitHub Ocean installation.
+func newGitHubOceanEntityQuery(newInstallationID string) map[string]interface{} {
+	return map[string]interface{}{
 		"combinator": "and",
 		"rules": []map[string]interface{}{
 			{
@@ -340,8 +423,76 @@ func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID str
 			},
 		},
 	}
+}
 
-	return c.searchEntitiesByBlueprint(blueprintID, query)
+// SearchNewEntitiesByBlueprint searches for new GitHub Ocean entities
+func (c *Client) SearchNewEntitiesByBlueprint(blueprintID, newInstallationID string) ([]Entity, error) {
+	return c.searchEntitiesByBlueprint(blueprintID, newGitHubOceanEntityQuery(newInstallationID))
+}
+
+// GroupCount represents a single bucket returned by the entities/group endpoint.
+type GroupCount struct {
+	Value string `json:"value"`
+	Count int    `json:"count"`
+}
+
+// GroupResponse represents the response of the entities/group endpoint.
+type GroupResponse struct {
+	Groups        []GroupCount `json:"groups"`
+	HasMoreGroups bool         `json:"hasMoreGroups"`
+}
+
+// CountEntitiesByBlueprint returns the total number of entities matching
+// `query` in a blueprint, using the entities/group aggregate endpoint. This
+// is much cheaper than paginating /entities/search just to count.
+func (c *Client) CountEntitiesByBlueprint(blueprintID string, query map[string]interface{}) (int, error) {
+	body := map[string]any{
+		"query": query,
+		"groupBy": map[string]any{
+			"property": "$blueprint",
+		},
+	}
+
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+
+	resp, err := c.doAuthorizedRequest(
+		"POST",
+		fmt.Sprintf("%s/v1/blueprints/%s/entities/group", c.baseURL, blueprintID),
+		bodyBytes,
+		"application/json",
+	)
+	if err != nil {
+		return 0, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("count failed: %s", string(b))
+	}
+
+	var gr GroupResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if len(gr.Groups) == 0 {
+		return 0, nil
+	}
+	return gr.Groups[0].Count, nil
+}
+
+// CountOldEntitiesByBlueprint counts entities ingested by the old GitHub App installation.
+func (c *Client) CountOldEntitiesByBlueprint(blueprintID, oldInstallationID string) (int, error) {
+	return c.CountEntitiesByBlueprint(blueprintID, oldGitHubAppEntityQuery(oldInstallationID))
+}
+
+// CountNewEntitiesByBlueprint counts entities ingested by the new GitHub Ocean installation.
+func (c *Client) CountNewEntitiesByBlueprint(blueprintID, newInstallationID string) (int, error) {
+	return c.CountEntitiesByBlueprint(blueprintID, newGitHubOceanEntityQuery(newInstallationID))
 }
 
 // PatchEntitiesDatasourceBulk updates entities' datasource in bulk
