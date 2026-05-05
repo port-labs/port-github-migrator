@@ -99,6 +99,7 @@ func (s *Store) LoadIdentifiers(oldInstallID, bp string) ([]string, error) {
 		return nil, fmt.Errorf("failed to parse identifier list %s: %w", bp, err)
 	}
 	if time.Since(c.CreatedAt) > cacheTTL {
+		_ = os.Remove(s.ManifestPath(oldInstallID, bp))
 		return nil, nil
 	}
 	return c.Identifiers, nil
