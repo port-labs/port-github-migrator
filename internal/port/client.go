@@ -12,14 +12,7 @@ import (
 	"time"
 )
 
-const (
-	maxRetries = 3
-
-	// MaxSearchResults caps the number of entities returned by a single
-	// search call. Source-side migration is bounded by this limit; counts
-	// returned via the entities/group endpoint are not.
-	MaxSearchResults = 5000
-)
+const maxRetries = 3
 
 // Client handles all Port API interactions
 type Client struct {
