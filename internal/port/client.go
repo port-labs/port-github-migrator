@@ -160,19 +160,22 @@ func (c *Client) doAuthorizedRequest(method, url string, body []byte, contentTyp
 			if i == maxRetries {
 				break
 			}
-			time.Sleep(backoff(i, 0))
+			time.Sleep(backoff(i))
 			continue
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			wait := retryAfter(resp.Header.Get("x-ratelimit-reset"))
+			if wait == 0 {
+				wait = backoff(i)
+			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			lastErr = fmt.Errorf("port returned status %d", resp.StatusCode)
 			if i == maxRetries {
 				break
 			}
-			time.Sleep(backoff(i, wait))
+			time.Sleep(wait)
 			continue
 		}
 
@@ -221,12 +224,7 @@ func (c *Client) attemptWithAuth(method, url string, body []byte, contentType st
 	return resp, nil
 }
 
-// backoff returns an exponential backoff with jitter, or `hint` if it's
-// positive (used to honor the server's Retry-After / x-ratelimit-reset hint).
-func backoff(attempt int, hint time.Duration) time.Duration {
-	if hint > 0 {
-		return hint
-	}
+func backoff(attempt int) time.Duration {
 	base := time.Duration(1<<attempt) * time.Second
 	jitter := time.Duration(rand.Int63n(int64(500 * time.Millisecond)))
 	return base + jitter
