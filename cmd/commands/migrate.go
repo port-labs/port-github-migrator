@@ -89,7 +89,7 @@ func NewMigrateCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				blueprints.PrintCounts(cmd.OutOrStdout(), counts, false, true)
+				blueprints.PrintCounts(cmd.OutOrStdout(), counts, false, false)
 				fmt.Fprintln(cmd.OutOrStdout())
 			}
 

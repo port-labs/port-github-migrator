@@ -101,10 +101,9 @@ func FetchCounts(client *port.Client, oldInstallID string, spinnerOut io.Writer)
 }
 
 // PrintCounts renders the standard NAME / ENTITIES table.
-//   - When includeEmpty is false, blueprints with 0 entities are omitted.
-//   - When showCap is true, blueprints whose count exceeds port.MaxSearchResults
-//     are rendered as "5000 / <total>" to indicate that downstream operations
-//     (migrate / get-diff) only process the first 5000 entities.
+// When includeEmpty is false, blueprints with 0 entities are omitted.
+// When showCap is true, blueprints whose count exceeds port.MaxSearchResults
+// are rendered as "capped / total" to surface the per-blueprint fetch limit.
 func PrintCounts(w io.Writer, counts []Count, includeEmpty, showCap bool) {
 	fmt.Fprintln(w, "NAME                              ENTITIES")
 	fmt.Fprintln(w, "──────────────────────────────────────────")

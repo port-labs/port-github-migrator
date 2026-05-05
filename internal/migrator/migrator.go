@@ -46,11 +46,9 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 	fmt.Println()
 	fmt.Println("⚠️  WARNING: This action cannot be undone!")
 	fmt.Println("    Please verify your data with 'dry-run' before proceeding.")
-	fmt.Printf("    Only the first %d entities per blueprint will be migrated.\n", port.MaxSearchResults)
 	fmt.Println()
 
 	totalEntities := 0
-	totalAvailable := 0
 	blueprintCounts := make(map[string]int)
 
 	// Count entities for each blueprint via the cheap aggregate endpoint.
@@ -60,19 +58,10 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 			return nil, fmt.Errorf("failed to count entities for blueprint %s: %w", bp, err)
 		}
 		blueprintCounts[bp] = count
-		totalAvailable += count
-		if count > port.MaxSearchResults {
-			totalEntities += port.MaxSearchResults
-		} else {
-			totalEntities += count
-		}
+		totalEntities += count
 	}
 
-	if totalEntities < totalAvailable {
-		fmt.Printf("📊 Total entities affected: %d / %d (capped at %d per blueprint)\n", totalEntities, totalAvailable, port.MaxSearchResults)
-	} else {
-		fmt.Printf("📊 Total entities affected: %d\n", totalEntities)
-	}
+	fmt.Printf("📊 Total entities affected: %d\n", totalEntities)
 
 	if totalEntities == 0 {
 		fmt.Println("⚠️  No entities found to migrate. Exiting.")
@@ -103,11 +92,7 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 			continue
 		}
 
-		if total > port.MaxSearchResults {
-			fmt.Printf("\n🔄 Migrating %d / %d entities from blueprint: %s\n", port.MaxSearchResults, total, bp)
-		} else {
-			fmt.Printf("\n🔄 Migrating %d entities from blueprint: %s\n", total, bp)
-		}
+		fmt.Printf("\n🔄 Migrating %d entities from blueprint: %s\n", total, bp)
 
 		if !dryRun {
 			if err := m.migrateBlueprint(bp, newDatasourceID); err != nil {
