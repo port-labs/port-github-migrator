@@ -13,13 +13,17 @@ import (
 
 func NewMigrateCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "migrate [blueprint]",
+		Use:          "migrate [sourceBlueprint] [targetBlueprint]",
 		Short:        "Migrate Ownership of entities from a specific blueprint or all blueprints",
 		Long: `Migrate Ownership of entities from the old GitHub App integration to the new GitHub Ocean integration.
 
-When run for a single blueprint, migrate honors the manifest produced by
-'get-diff' if one exists for the same old installation: it patches exactly
-those identifiers and removes the manifest on success.`,
+Modes:
+  migrate <blueprint>                              Migrate a single blueprint (uses get-diff cache if available).
+  migrate --all                                    Migrate every blueprint reachable from the old installation.
+  migrate <sourceBlueprint> <targetBlueprint> --auto
+                                                   Auto mode: paginate the source blueprint, diff each batch
+                                                   against the target blueprint under the new installation,
+                                                   patch identicals in place, and dump the rest to a result file.`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			portURL, _ := cmd.Flags().GetString("port-url")
@@ -29,19 +33,34 @@ those identifiers and removes the manifest on success.`,
 			newInstallID, _ := cmd.Flags().GetString("new-installation-id")
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			all, _ := cmd.Flags().GetBool("all")
+			auto, _ := cmd.Flags().GetBool("auto")
 
+			if auto && all {
+				return fmt.Errorf("❌ --auto cannot be combined with --all; auto mode runs against a single source/target blueprint pair")
+			}
+			if auto && len(args) != 2 {
+				return fmt.Errorf("❌ --auto requires both sourceBlueprint and targetBlueprint arguments. Usage: migrate <sourceBlueprint> <targetBlueprint> --auto")
+			}
+			if !auto && len(args) > 1 {
+				return fmt.Errorf("❌ a second blueprint argument is only valid with --auto (source/target pair). Use a single blueprint or --all otherwise")
+			}
 			if len(args) == 0 && !all {
-				return fmt.Errorf("❌ either provide a blueprint name or use --all flag. Usage: migrate <blueprint> or migrate --all")
+				return fmt.Errorf("❌ either provide a blueprint name or use --all flag. Usage: migrate <blueprint> or migrate --all or migrate <sourceBlueprint> <targetBlueprint> --auto")
 			}
 			if len(args) > 0 && all {
 				return fmt.Errorf("❌ cannot use both blueprint argument and --all flag")
 			}
 
 			blueprint := ""
+			targetBlueprint := ""
 			if len(args) > 0 {
 				blueprint = args[0]
 			}
+			if len(args) > 1 {
+				targetBlueprint = args[1]
+			}
 
+			// Validate required parameters
 			var missing []string
 			if clientID == "" {
 				missing = append(missing, "--client-id")
@@ -59,8 +78,11 @@ those identifiers and removes the manifest on success.`,
 				return fmt.Errorf("❌ missing required options: %v", missing)
 			}
 
+			// Create Port client
 			client := port.NewClient(portURL, clientID, clientSecret)
 
+			// Fetch the new integration. We need its version for the datasource id
+			// and its config for the entityDeletionThreshold safety check.
 			intg, err := client.GetIntegration(newInstallID)
 			if err != nil {
 				return fmt.Errorf("failed to get integration: %w", err)
@@ -73,8 +95,10 @@ those identifiers and removes the manifest on success.`,
 				return err
 			}
 
+			// Construct new datasource ID
 			newDatasourceID := fmt.Sprintf("port-ocean/github-ocean/%s/%s/exporter", intg.Version, newInstallID)
 
+			// Create config
 			config := &models.Config{
 				PortAPIURL:        portURL,
 				ClientID:          clientID,
@@ -92,29 +116,49 @@ those identifiers and removes the manifest on success.`,
 
 			mig := migrator.NewMigrator(client, config, st)
 
-			if all {
-				fmt.Fprintln(cmd.OutOrStdout(), "📋 Blueprints to migrate:")
-
-				counts, err := blueprints.FetchCounts(client, oldInstallID, cmd.ErrOrStderr())
-				if err != nil {
-					return err
-				}
-				blueprints.PrintCounts(cmd.OutOrStdout(), counts, false, true)
-				fmt.Fprintln(cmd.OutOrStdout())
+		// Auto mode: paginate the source blueprint, diff each batch against
+		// the target blueprint under the new install, patch identicals in
+		// place, and dump the leftover changed/missing entities to a single
+		// result file under the cache directory.
+		if auto {
+			if st == nil {
+				return fmt.Errorf("❌ --auto requires a writable cache directory; could not open one")
 			}
-
-			var bp *string
-			if !all && blueprint != "" {
-				bp = &blueprint
+			path, err := mig.MigrateAuto(blueprint, targetBlueprint, newDatasourceID, dryRun, cmd.ErrOrStderr())
+			if err != nil {
+				return err
 			}
+			fmt.Fprintf(cmd.OutOrStdout(), "📝 Result file: %s\n", path)
+			return nil
+		}
 
-			_, err = mig.Migrate(newDatasourceID, bp, dryRun)
-			return err
+		// If migrating "all", show blueprints with entity counts first
+		if all {
+			fmt.Fprintln(cmd.OutOrStdout(), "📋 Blueprints to migrate:")
+
+			counts, err := blueprints.FetchCounts(client, oldInstallID, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			blueprints.PrintCounts(cmd.OutOrStdout(), counts, false, true)
+			fmt.Fprintln(cmd.OutOrStdout())
+		}
+
+		// Determine if migrating single blueprint or all
+		var bp *string
+		if !all && blueprint != "" {
+			bp = &blueprint
+		}
+
+		// Run migration
+		_, err = mig.Migrate(newDatasourceID, bp, dryRun)
+		return err
 		},
 	}
 
 	cmd.Flags().Bool("dry-run", false, "Show what would be migrated without making changes")
 	cmd.Flags().Bool("all", false, "Migrate all blueprints with entities")
+	cmd.Flags().Bool("auto", false, "Auto mode: paginate the source blueprint in batches, diff each batch against the target blueprint under the new install, migrate identical entities, and dump remaining diffs to a result file. Requires <sourceBlueprint> <targetBlueprint> positional args.")
 
 	return cmd
 }
@@ -129,7 +173,7 @@ func requireZeroDeletionThreshold(intg *port.Integration) error {
 
 	raw, ok := intg.Config[key]
 	if !ok {
-		return fmt.Errorf("❌ %s is not set in the new GitHub Ocean integration's mapping config; without it, the next resync may delete migrated entities. %s", key, remediation)
+		return fmt.Errorf("❌ %s is not set in the new GitHub Ocean integration's mapping config; without it, the next resync may delete migrated entities, because it's using the temp blueprint. %s", key, remediation)
 	}
 	n, ok := raw.(float64)
 	if !ok {

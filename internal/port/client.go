@@ -480,6 +480,75 @@ func (c *Client) searchEntitiesByBlueprint(blueprintID string, query map[string]
 	return allEntities, nil
 }
 
+// SearchOldEntitiesPaged streams old GitHub App entities to `handle` in
+// batches of up to `batchSize` (defaults to MaxSearchResults when <= 0).
+// Unlike SearchOldEntitiesByBlueprint, this method has no overall cap: it
+// walks the cursor until exhausted so auto mode can process every entity.
+// `handle` is invoked synchronously; returning an error aborts iteration.
+func (c *Client) SearchOldEntitiesPaged(
+	blueprintID, oldInstallationID string,
+	batchSize int,
+	options *SearchOptions,
+	handle func(batch []Entity, batchIndex int) error,
+) error {
+	if batchSize <= 0 {
+		batchSize = MaxSearchResults
+	}
+
+	opts := DefaultSearchOptions()
+	if options != nil {
+		opts = *options
+	}
+	opts.EnforceTotalLimit = false
+
+	include, err := c.resolveIncludes(blueprintID, opts)
+	if err != nil {
+		return err
+	}
+
+	query := oldGitHubAppEntityQuery(oldInstallationID)
+
+	var (
+		buffer     []Entity
+		next       string
+		batchIndex int
+		exhausted  bool
+	)
+
+	for !exhausted {
+		page, nextCursor, err := c.fetchSearchPage(searchPageRequest{
+			blueprintID: blueprintID,
+			query:       query,
+			include:     include,
+			from:        next,
+		})
+		if err != nil {
+			return err
+		}
+
+		buffer = append(buffer, page...)
+		next = nextCursor
+		exhausted = nextCursor == ""
+
+		for len(buffer) >= batchSize {
+			batch := buffer[:batchSize]
+			if err := handle(batch, batchIndex); err != nil {
+				return err
+			}
+			batchIndex++
+			buffer = buffer[batchSize:]
+		}
+	}
+
+	if len(buffer) > 0 {
+		if err := handle(buffer, batchIndex); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func oldGitHubAppEntityQuery(oldInstallationID string) map[string]any {
 	return map[string]any{
 		"combinator": "and",
