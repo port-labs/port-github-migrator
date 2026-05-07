@@ -45,19 +45,18 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 	// Show warning and get confirmation
 	fmt.Println()
 	fmt.Println("⚠️  WARNING: This action cannot be undone!")
-	fmt.Println("    Please verify your data with 'get-diff' and 'dry-run' before proceeding.")
+	fmt.Println("    Please verify your data with 'dry-run' before proceeding.")
 	fmt.Println()
 
 	totalEntities := 0
 	blueprintCounts := make(map[string]int)
 
-	// Count entities for each blueprint
+	// Count entities for each blueprint via the cheap aggregate endpoint.
 	for _, bp := range blueprints {
-		entities, err := m.client.SearchOldEntitiesByBlueprint(bp, m.config.OldInstallationID)
+		count, err := m.client.CountOldEntitiesByBlueprint(bp, m.config.OldInstallationID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to search entities for blueprint %s: %w", bp, err)
+			return nil, fmt.Errorf("failed to count entities for blueprint %s: %w", bp, err)
 		}
-		count := len(entities)
 		blueprintCounts[bp] = count
 		totalEntities += count
 	}
@@ -86,16 +85,14 @@ func (m *Migrator) Migrate(newDatasourceID string, blueprintID *string, dryRun b
 
 	// Migrate each blueprint
 	for _, bp := range blueprints {
-		count := blueprintCounts[bp]
-		
-		// Skip blueprints with no entities
-		if count == 0 {
-			fmt.Printf("\n🔄 Migrating %d entities from blueprint: %s\n", count, bp)
+		total := blueprintCounts[bp]
+
+		if total == 0 {
 			fmt.Println("⏭️  No entities to migrate")
 			continue
 		}
-		
-		fmt.Printf("\n🔄 Migrating %d entities from blueprint: %s\n", count, bp)
+
+		fmt.Printf("\n🔄 Migrating %d entities from blueprint: %s\n", total, bp)
 
 		if !dryRun {
 			if err := m.migrateBlueprint(bp, newDatasourceID); err != nil {

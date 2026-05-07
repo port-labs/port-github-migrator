@@ -7,7 +7,7 @@ import (
 	"github.com/port-labs/port-github-migrator/cmd/commands"
 )
 
-const Version = "1.0.0"
+const Version = "v0.0.6"
 
 func main() {
 	// Load .env file

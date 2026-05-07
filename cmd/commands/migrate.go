@@ -3,10 +3,11 @@ package commands
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
+	"github.com/port-labs/port-github-migrator/internal/blueprints"
 	"github.com/port-labs/port-github-migrator/internal/migrator"
 	"github.com/port-labs/port-github-migrator/internal/models"
 	"github.com/port-labs/port-github-migrator/internal/port"
+	"github.com/spf13/cobra"
 )
 
 func NewMigrateCommand() *cobra.Command {
@@ -24,7 +25,6 @@ func NewMigrateCommand() *cobra.Command {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			all, _ := cmd.Flags().GetBool("all")
 
-			// Validate blueprint or --all flag
 			if len(args) == 0 && !all {
 				return fmt.Errorf("❌ either provide a blueprint name or use --all flag. Usage: migrate <blueprint> or migrate --all")
 			}
@@ -37,7 +37,6 @@ func NewMigrateCommand() *cobra.Command {
 				blueprint = args[0]
 			}
 
-			// Validate required parameters
 			var missing []string
 			if clientID == "" {
 				missing = append(missing, "--client-id")
@@ -55,19 +54,24 @@ func NewMigrateCommand() *cobra.Command {
 				return fmt.Errorf("❌ missing required options: %v", missing)
 			}
 
-			// Create Port client
 			client := port.NewClient(portURL, clientID, clientSecret)
 
-			// Get integration version
-			version, err := client.GetIntegrationVersion(newInstallID)
+			// Fetch the new integration. We need its version for the datasource id
+			// and its config for the entityDeletionThreshold safety check.
+			intg, err := client.GetIntegration(newInstallID)
 			if err != nil {
-				return fmt.Errorf("failed to get integration version: %w", err)
+				return fmt.Errorf("failed to get integration: %w", err)
+			}
+			if intg.Version == "" {
+				return fmt.Errorf("integration version not found")
 			}
 
-			// Construct new datasource ID
-			newDatasourceID := fmt.Sprintf("port-ocean/github-ocean/%s/%s/exporter", version, newInstallID)
+			if err := requireZeroDeletionThreshold(intg); err != nil {
+				return err
+			}
 
-			// Create config
+			newDatasourceID := fmt.Sprintf("port-ocean/github-ocean/%s/%s/exporter", intg.Version, newInstallID)
+
 			config := &models.Config{
 				PortAPIURL:        portURL,
 				ClientID:          clientID,
@@ -76,47 +80,26 @@ func NewMigrateCommand() *cobra.Command {
 				NewInstallationID: newInstallID,
 			}
 
-			// Create migrator
 			mig := migrator.NewMigrator(client, config)
 
-		// If migrating "all", show blueprints with entity counts first
-		if all {
-			fmt.Println("📋 Blueprints to migrate:")
-			fmt.Println("NAME                              ENTITIES")
-			fmt.Println("──────────────────────────────────────────")
-			
-			blueprints, err := client.GetBlueprintsByDataSource(oldInstallID)
-			if err != nil {
-				return fmt.Errorf("failed to get blueprints: %w", err)
-			}
-			
-			for _, bp := range blueprints {
-				entities, err := client.SearchOldEntitiesByBlueprint(bp, oldInstallID)
+			if all {
+				fmt.Fprintln(cmd.OutOrStdout(), "📋 Blueprints to migrate:")
+
+				counts, err := blueprints.FetchCounts(client, oldInstallID, cmd.ErrOrStderr())
 				if err != nil {
-					fmt.Printf("%-33s ?\n", bp)
-					continue
+					return err
 				}
-				count := len(entities)
-				
-				// Skip empty blueprints (no entities to migrate)
-				if count == 0 {
-					continue
-				}
-				
-				fmt.Printf("%-33s %d\n", bp, count)
+				blueprints.PrintCounts(cmd.OutOrStdout(), counts, false)
+				fmt.Fprintln(cmd.OutOrStdout())
 			}
-			fmt.Println()
-		}
 
-		// Determine if migrating single blueprint or all
-		var bp *string
-		if !all && blueprint != "" {
-			bp = &blueprint
-		}
+			var bp *string
+			if !all && blueprint != "" {
+				bp = &blueprint
+			}
 
-		// Run migration
-		_, err = mig.Migrate(newDatasourceID, bp, dryRun)
-		return err
+			_, err = mig.Migrate(newDatasourceID, bp, dryRun)
+			return err
 		},
 	}
 
@@ -124,4 +107,26 @@ func NewMigrateCommand() *cobra.Command {
 	cmd.Flags().Bool("all", false, "Migrate all blueprints with entities")
 
 	return cmd
+}
+
+// requireZeroDeletionThreshold enforces that the GitHub Ocean integration's
+// mapping config has `entityDeletionThreshold` explicitly set to 0, so that
+// the next resync after migration does not delete the freshly re-owned
+// entities.
+func requireZeroDeletionThreshold(intg *port.Integration) error {
+	const key = "entityDeletionThreshold"
+	const remediation = "Set `entityDeletionThreshold: 0` in the GitHub Ocean integration's mapping config and try again."
+
+	raw, ok := intg.Config[key]
+	if !ok {
+		return fmt.Errorf("❌ %s is not set in the new GitHub Ocean integration's mapping config; without it, the next resync may delete migrated entities. %s", key, remediation)
+	}
+	n, ok := raw.(float64)
+	if !ok {
+		return fmt.Errorf("❌ %s in the new GitHub Ocean integration's mapping config is %v (expected 0). %s", key, raw, remediation)
+	}
+	if n != 0 {
+		return fmt.Errorf("❌ %s in the new GitHub Ocean integration's mapping config is %v; it must be 0 to prevent migrated entities from being deleted on the next resync. %s", key, n, remediation)
+	}
+	return nil
 }
