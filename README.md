@@ -89,7 +89,7 @@ COMMANDS:
 
 ## Usage
 
-Please refer to the migration guide documentation: [https://docs.port.io/build-your-software-catalog/sync-data-to-catalog/git/github-ocean/migration-guide](https://docs.port.io/build-your-software-catalog/sync-data-to-catalog/git/github-ocean/migration-from-github-app?method=github-app&step=authentication-method&s1=hosted-by-port#step-by-step-migration-plan--step-by-step-migration-plan-)
+Please refer to the migration guide documentation: [https://docs.port.io/build-your-software-catalog/sync-data-to-catalog/git/github-ocean/migration-guide](https://docs.port.io/build-your-software-catalog/sync-data-to-catalog/git/github-ocean/migration/migration-steps)
 
 ### Get Blueprints
 
