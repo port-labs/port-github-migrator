@@ -37,6 +37,9 @@ jobs:
           - os: linux
             arch: amd64
             asset: port-github-migrator-linux-x64
+          - os: linux
+            arch: arm64
+            asset: port-github-migrator-linux-arm64
           - os: darwin
             arch: amd64
             asset: port-github-migrator-macos-x64
