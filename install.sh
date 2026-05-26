@@ -35,7 +35,18 @@ case "$OS" in
     ;;
   Linux)
     OS_NAME="linux"
-    ARCH_NAME="x64"
+    case "$ARCH" in
+      x86_64)
+        ARCH_NAME="x64"
+        ;;
+      aarch64|arm64)
+        ARCH_NAME="arm64"
+        ;;
+      *)
+        echo -e "${RED}❌ Unsupported architecture: $ARCH${NC}"
+        exit 1
+        ;;
+    esac
     ;;
   MINGW*|MSYS*|CYGWIN*)
     OS_NAME="win"
