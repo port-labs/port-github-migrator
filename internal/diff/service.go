@@ -25,7 +25,8 @@ func NewService(client *port.Client) *Service {
 // CompareBlueprints compares entities between source and target blueprints.
 // Source and target searches run concurrently. A spinner is rendered to
 // spinnerOut while the requests are in flight; pass io.Discard to disable it.
-func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstallID string, spinnerOut io.Writer) (*models.DiffResult, error) {
+// ignoreProperties is a list of property/relation keys to exclude from comparison.
+func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstallID string, spinnerOut io.Writer, ignoreProperties []string) (*models.DiffResult, error) {
 	sp := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 	sp.Writer = spinnerOut
 	sp.HideCursor = true
@@ -110,7 +111,7 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 
 	setDiffSuffix()
 
-	identical, changed, notMigrated := DiffEntities(sourceEntities, targetEntities)
+	identical, changed, notMigrated := DiffEntities(sourceEntities, targetEntities, ignoreProperties)
 
 	sourceIdentifiers := make([]string, 0, len(sourceEntities))
 	for _, e := range sourceEntities {
@@ -133,6 +134,45 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 	}, nil
 }
 
+// filterEntity removes specified properties from an entity before comparison.
+// Ignored properties are removed from both Properties and Relations maps.
+func filterEntity(e port.Entity, ignoreProperties []string) port.Entity {
+	if len(ignoreProperties) == 0 {
+		return e
+	}
+
+	ignoreMap := make(map[string]bool)
+	for _, prop := range ignoreProperties {
+		ignoreMap[prop] = true
+	}
+
+	// Filter properties
+	if e.Properties != nil {
+		newProps := make(map[string]interface{})
+		for k, v := range e.Properties {
+			if !ignoreMap[k] {
+				newProps[k] = v
+			}
+		}
+		e.Properties = newProps
+	}
+
+	// Filter relations (which is interface{}, typically a map)
+	if e.Relations != nil {
+		if relMap, ok := e.Relations.(map[string]interface{}); ok {
+			newRels := make(map[string]interface{})
+			for k, v := range relMap {
+				if !ignoreMap[k] {
+					newRels[k] = v
+				}
+			}
+			e.Relations = newRels
+		}
+	}
+
+	return e
+}
+
 // DiffEntities compares one batch of source entities to the target entities
 // fetched for them. It returns three disjoint slices so callers can act on
 // them directly without re-discriminating by type:
@@ -140,7 +180,9 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 //   - identical:  identifiers that match on both sides
 //   - changed:    EntityChange values carrying the per-property diffs
 //   - notMigrated: identifiers present on the source but missing from the target
-func DiffEntities(source, target []port.Entity) (identical []string, changed []models.EntityChange, notMigrated []string) {
+//
+// ignoreProperties is a list of property/relation keys to exclude from comparison.
+func DiffEntities(source, target []port.Entity, ignoreProperties []string) (identical []string, changed []models.EntityChange, notMigrated []string) {
 	targetMap := make(map[string]port.Entity, len(target))
 	for _, e := range target {
 		targetMap[e.Identifier] = e
@@ -157,13 +199,18 @@ func DiffEntities(source, target []port.Entity) (identical []string, changed []m
 			notMigrated = append(notMigrated, id)
 			continue
 		}
-		if entitiesEqual(sourceEntity, targetEntity) {
+
+		// Apply filtering for comparison
+		sourceFiltered := filterEntity(sourceEntity, ignoreProperties)
+		targetFiltered := filterEntity(targetEntity, ignoreProperties)
+
+		if entitiesEqual(sourceFiltered, targetFiltered) {
 			identical = append(identical, id)
 			continue
 		}
 		changed = append(changed, models.EntityChange{
 			Identifier:    id,
-			PropertyDiffs: getPropertyDiffs(sourceEntity, targetEntity),
+			PropertyDiffs: getPropertyDiffs(sourceFiltered, targetFiltered),
 		})
 	}
 
