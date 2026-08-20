@@ -34,6 +34,8 @@ Modes:
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
 			all, _ := cmd.Flags().GetBool("all")
 			auto, _ := cmd.Flags().GetBool("auto")
+			ignoreProperties, _ := cmd.Flags().GetStringSlice("ignore-property")
+			ignoreRelations, _ := cmd.Flags().GetStringSlice("ignore-relation")
 
 			if auto && all {
 				return fmt.Errorf("❌ --auto cannot be combined with --all; auto mode runs against a single source/target blueprint pair")
@@ -124,7 +126,7 @@ Modes:
 			if st == nil {
 				return fmt.Errorf("❌ --auto requires a writable cache directory; could not open one")
 			}
-			path, err := mig.MigrateAuto(blueprint, targetBlueprint, newDatasourceID, dryRun, cmd.ErrOrStderr())
+			path, err := mig.MigrateAuto(blueprint, targetBlueprint, newDatasourceID, dryRun, cmd.ErrOrStderr(), ignoreProperties, ignoreRelations)
 			if err != nil {
 				return err
 			}
@@ -159,6 +161,8 @@ Modes:
 	cmd.Flags().Bool("dry-run", false, "Show what would be migrated without making changes")
 	cmd.Flags().Bool("all", false, "Migrate all blueprints with entities")
 	cmd.Flags().Bool("auto", false, "Auto mode: paginate the source blueprint in batches, diff each batch against the target blueprint under the new install, migrate identical entities, and dump remaining diffs to a result file. Requires <sourceBlueprint> <targetBlueprint> positional args.")
+	cmd.Flags().StringSlice("ignore-property", []string{}, "Properties to ignore when comparing entities (repeatable)")
+	cmd.Flags().StringSlice("ignore-relation", []string{}, "Relations to ignore when comparing entities (repeatable)")
 
 	return cmd
 }
