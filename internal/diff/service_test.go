@@ -17,7 +17,7 @@ func TestFilterEntity_RemovesProperties(t *testing.T) {
 		},
 	}
 
-	filtered := filterEntity(entity, []string{"pr_age", "pr_age_label"})
+	filtered := filterEntity(entity, []string{"pr_age", "pr_age_label"}, []string{})
 
 	// Should only have created_at
 	if len(filtered.Properties) != 1 {
@@ -44,7 +44,7 @@ func TestFilterEntity_NoIgnoreList(t *testing.T) {
 		},
 	}
 
-	filtered := filterEntity(entity, []string{})
+	filtered := filterEntity(entity, []string{}, []string{})
 
 	// Should remain unchanged
 	if len(filtered.Properties) != 2 {
@@ -65,7 +65,7 @@ func TestFilterEntity_WithRelations(t *testing.T) {
 		},
 	}
 
-	filtered := filterEntity(entity, []string{"pr_age", "related_pr_age"})
+	filtered := filterEntity(entity, []string{"pr_age"}, []string{"related_pr_age"})
 
 	// Properties should be filtered
 	if _, ok := filtered.Properties["pr_age"]; ok {
@@ -108,7 +108,7 @@ func TestDiffEntities_WithIgnoreProperties(t *testing.T) {
 		},
 	}
 
-	identical, changed, notMigrated := DiffEntities(source, target, []string{"pr_age"})
+	identical, changed, notMigrated := DiffEntities(source, target, []string{"pr_age"}, []string{})
 
 	// Should be identical when pr_age is ignored
 	if len(identical) != 1 || identical[0] != "id-1" {
@@ -145,7 +145,7 @@ func TestDiffEntities_WithoutIgnoreProperties(t *testing.T) {
 		},
 	}
 
-	identical, changed, _ := DiffEntities(source, target, []string{})
+	identical, changed, _ := DiffEntities(source, target, []string{}, []string{})
 
 	// Should be changed when pr_age is NOT ignored
 	if len(identical) != 0 {
@@ -182,7 +182,7 @@ func TestDiffEntities_NotMigrated(t *testing.T) {
 		// id-2 missing in target
 	}
 
-	identical, _, notMigrated := DiffEntities(source, target, []string{})
+	identical, _, notMigrated := DiffEntities(source, target, []string{}, []string{})
 
 	if len(identical) != 1 {
 		t.Fatalf("expected 1 identical entity, got %d", len(identical))
@@ -201,7 +201,7 @@ func TestFilterEntity_PreservesIdentifier(t *testing.T) {
 		},
 	}
 
-	filtered := filterEntity(entity, []string{"pr_age"})
+	filtered := filterEntity(entity, []string{"pr_age"}, []string{})
 
 	if filtered.Identifier != "preserve-me" {
 		t.Fatalf("identifier should be preserved, got %s", filtered.Identifier)

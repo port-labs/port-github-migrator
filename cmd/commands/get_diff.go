@@ -34,6 +34,7 @@ func NewGetDiffCommand() *cobra.Command {
 			limitStr, _ := cmd.Flags().GetString("limit")
 			outputPath, _ := cmd.Flags().GetString("output")
 			ignoreProperties, _ := cmd.Flags().GetStringSlice("ignore-property")
+			ignoreRelations, _ := cmd.Flags().GetStringSlice("ignore-relation")
 
 			sourceBlueprint := args[0]
 			targetBlueprint := args[1]
@@ -69,7 +70,7 @@ func NewGetDiffCommand() *cobra.Command {
 			diffService := diff.NewService(client)
 
 			// Run comparison
-			result, err := diffService.CompareBlueprints(sourceBlueprint, targetBlueprint, oldInstallID, newInstallID, cmd.ErrOrStderr(), ignoreProperties)
+			result, err := diffService.CompareBlueprints(sourceBlueprint, targetBlueprint, oldInstallID, newInstallID, cmd.ErrOrStderr(), ignoreProperties, ignoreRelations)
 			if err != nil {
 				return fmt.Errorf("failed to compare blueprints: %w", err)
 			}
@@ -104,6 +105,7 @@ func NewGetDiffCommand() *cobra.Command {
 	cmd.Flags().String("limit", "10", "Limit number of shown changes")
 	cmd.Flags().StringP("output", "o", "", "Write the diff to this file instead of stdout")
 	cmd.Flags().StringSlice("ignore-property", []string{}, "Properties to ignore when comparing entities (repeatable)")
+	cmd.Flags().StringSlice("ignore-relation", []string{}, "Relations to ignore when comparing entities (repeatable)")
 
 	return cmd
 }

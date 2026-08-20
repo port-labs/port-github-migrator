@@ -34,8 +34,8 @@ const autoPatchChunkSize = 20
 //
 // Auto mode requires a working store (we always write a result file). The
 // spinner is rendered to spinnerOut; pass io.Discard to disable it.
-// ignoreProperties is a list of property/relation keys to exclude from comparison.
-func (m *Migrator) MigrateAuto(sourceBlueprintID, targetBlueprintID, newDatasourceID string, dryRun bool, spinnerOut io.Writer, ignoreProperties []string) (string, error) {
+// ignoreProperties filters property keys; ignoreRelations filters relation keys.
+func (m *Migrator) MigrateAuto(sourceBlueprintID, targetBlueprintID, newDatasourceID string, dryRun bool, spinnerOut io.Writer, ignoreProperties, ignoreRelations []string) (string, error) {
 	if m.store == nil {
 		return "", errors.New("auto mode requires a writable cache directory; could not open one")
 	}
@@ -116,7 +116,7 @@ func (m *Migrator) MigrateAuto(sourceBlueprintID, targetBlueprintID, newDatasour
 
 		setSuffix(fmt.Sprintf("diffing %d source vs %d target entities...", len(batch), len(targetEntities)))
 
-		identical, changed, notMigrated := diff.DiffEntities(batch, targetEntities, ignoreProperties)
+		identical, changed, notMigrated := diff.DiffEntities(batch, targetEntities, ignoreProperties, ignoreRelations)
 		totalProcessed += len(batch)
 
 		result.Changed = append(result.Changed, changed...)

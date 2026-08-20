@@ -25,8 +25,8 @@ func NewService(client *port.Client) *Service {
 // CompareBlueprints compares entities between source and target blueprints.
 // Source and target searches run concurrently. A spinner is rendered to
 // spinnerOut while the requests are in flight; pass io.Discard to disable it.
-// ignoreProperties is a list of property/relation keys to exclude from comparison.
-func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstallID string, spinnerOut io.Writer, ignoreProperties []string) (*models.DiffResult, error) {
+// ignoreProperties filters property keys; ignoreRelations filters relation keys.
+func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstallID string, spinnerOut io.Writer, ignoreProperties, ignoreRelations []string) (*models.DiffResult, error) {
 	sp := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 	sp.Writer = spinnerOut
 	sp.HideCursor = true
@@ -111,7 +111,7 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 
 	setDiffSuffix()
 
-	identical, changed, notMigrated := DiffEntities(sourceEntities, targetEntities, ignoreProperties)
+	identical, changed, notMigrated := DiffEntities(sourceEntities, targetEntities, ignoreProperties, ignoreRelations)
 
 	sourceIdentifiers := make([]string, 0, len(sourceEntities))
 	for _, e := range sourceEntities {
@@ -134,35 +134,36 @@ func (s *Service) CompareBlueprints(sourceBP, targetBP, oldInstallID, newInstall
 	}, nil
 }
 
-// filterEntity removes specified properties from an entity before comparison.
-// Ignored properties are removed from both Properties and Relations maps.
-func filterEntity(e port.Entity, ignoreProperties []string) port.Entity {
-	if len(ignoreProperties) == 0 {
-		return e
+// filterEntity removes specified properties and relations from an entity before comparison.
+func filterEntity(e port.Entity, ignoreProperties, ignoreRelations []string) port.Entity {
+	// Build ignore maps
+	ignorePropMap := make(map[string]bool)
+	for _, prop := range ignoreProperties {
+		ignorePropMap[prop] = true
 	}
 
-	ignoreMap := make(map[string]bool)
-	for _, prop := range ignoreProperties {
-		ignoreMap[prop] = true
+	ignoreRelMap := make(map[string]bool)
+	for _, rel := range ignoreRelations {
+		ignoreRelMap[rel] = true
 	}
 
 	// Filter properties
-	if e.Properties != nil {
+	if e.Properties != nil && len(ignoreProperties) > 0 {
 		newProps := make(map[string]interface{})
 		for k, v := range e.Properties {
-			if !ignoreMap[k] {
+			if !ignorePropMap[k] {
 				newProps[k] = v
 			}
 		}
 		e.Properties = newProps
 	}
 
-	// Filter relations (which is interface{}, typically a map)
-	if e.Relations != nil {
+	// Filter relations
+	if e.Relations != nil && len(ignoreRelations) > 0 {
 		if relMap, ok := e.Relations.(map[string]interface{}); ok {
 			newRels := make(map[string]interface{})
 			for k, v := range relMap {
-				if !ignoreMap[k] {
+				if !ignoreRelMap[k] {
 					newRels[k] = v
 				}
 			}
@@ -181,8 +182,8 @@ func filterEntity(e port.Entity, ignoreProperties []string) port.Entity {
 //   - changed:    EntityChange values carrying the per-property diffs
 //   - notMigrated: identifiers present on the source but missing from the target
 //
-// ignoreProperties is a list of property/relation keys to exclude from comparison.
-func DiffEntities(source, target []port.Entity, ignoreProperties []string) (identical []string, changed []models.EntityChange, notMigrated []string) {
+// ignoreProperties filters property keys; ignoreRelations filters relation keys.
+func DiffEntities(source, target []port.Entity, ignoreProperties, ignoreRelations []string) (identical []string, changed []models.EntityChange, notMigrated []string) {
 	targetMap := make(map[string]port.Entity, len(target))
 	for _, e := range target {
 		targetMap[e.Identifier] = e
@@ -201,8 +202,8 @@ func DiffEntities(source, target []port.Entity, ignoreProperties []string) (iden
 		}
 
 		// Apply filtering for comparison
-		sourceFiltered := filterEntity(sourceEntity, ignoreProperties)
-		targetFiltered := filterEntity(targetEntity, ignoreProperties)
+		sourceFiltered := filterEntity(sourceEntity, ignoreProperties, ignoreRelations)
+		targetFiltered := filterEntity(targetEntity, ignoreProperties, ignoreRelations)
 
 		if entitiesEqual(sourceFiltered, targetFiltered) {
 			identical = append(identical, id)
