@@ -8,18 +8,23 @@ Entities stay on the **same blueprints**. The tool only updates `$datasource` so
 
 - Dry-run and diff before you transfer ownership
 - Compare legacy vs Ocean entities (`get-diff`)
-- Migrate one blueprint at a time, or all (with limits — see below)
-- `--auto` for large blueprints (paginated; patches identical entities only)
+- Migrate one blueprint at a time, or all (with limits - see below)
+- **Default `migrate`** - re-owns matching legacy entities on a blueprint (up to 5000 per run, with a confirmation prompt). Use this for smaller blueprints after you have reviewed `get-diff`.
+- **`--auto`** - paginates past the 5000 cap, diffs against a temp target blueprint, and patches only **identical** entities. Prefer this for large blueprints (for example pull requests or branches). Do not combine with `--all`.
 
 ## Installation
 
-### Quick install (recommended)
+### Quick Install (Recommended)
+
+One-line installation that automatically downloads the correct binary for your platform.
+
+The script detects your OS/architecture, downloads the release binary, verifies it, and installs to `/usr/local/bin/port-github-migrator`:
 
 ```bash
 curl -sL https://raw.githubusercontent.com/port-labs/port-github-migrator/main/install.sh | bash
 ```
 
-The script detects your OS/architecture, downloads the release binary, verifies it, and installs to `/usr/local/bin/port-github-migrator`.
+Confirm the install works:
 
 ```bash
 port-github-migrator --version
